@@ -43,22 +43,39 @@ export default function RegisterPage() {
       <h1 className="text-xl font-bold mb-4">สมัครสมาชิก</h1>
       {error && <p className="text-red-600 mb-2">{error}</p>}
       <form onSubmit={handleSubmit} className="flex flex-col gap-3">
-        <input name="name" placeholder="ชื่อ" required className="border p-2 rounded" />
-        <input
-          name="email"
-          type="email"
-          placeholder="อีเมล"
-          required
-          className="border p-2 rounded"
-        />
-        <input
-          name="password"
-          type="password"
-          placeholder="รหัสผ่าน (8 ตัวขึ้นไป)"
-          required
-          minLength={8}
-          className="border p-2 rounded"
-        />
+        <div className="flex flex-col gap-1">
+          <label htmlFor="register-name" className="text-sm font-medium">
+            ชื่อ
+          </label>
+          <input id="register-name" name="name" placeholder="ชื่อ" required className="border p-2 rounded" />
+        </div>
+        <div className="flex flex-col gap-1">
+          <label htmlFor="register-email" className="text-sm font-medium">
+            อีเมล
+          </label>
+          <input
+            id="register-email"
+            name="email"
+            type="email"
+            placeholder="อีเมล"
+            required
+            className="border p-2 rounded"
+          />
+        </div>
+        <div className="flex flex-col gap-1">
+          <label htmlFor="register-password" className="text-sm font-medium">
+            รหัสผ่าน (8 ตัวขึ้นไป)
+          </label>
+          <input
+            id="register-password"
+            name="password"
+            type="password"
+            placeholder="รหัสผ่าน (8 ตัวขึ้นไป)"
+            required
+            minLength={8}
+            className="border p-2 rounded"
+          />
+        </div>
         <button type="submit" className="bg-black text-white p-2 rounded">
           สมัครสมาชิก
         </button>

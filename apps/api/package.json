@@ -9,6 +9,9 @@
     "start": "node --env-file-if-exists=.env dist/index.js",
     "test": "vitest run"
   },
+  "prisma": {
+    "seed": "tsx --env-file-if-exists=.env prisma/seed.ts"
+  },
   "dependencies": {
     "@prisma/client": "^6.19.3",
     "bcrypt": "^6.0.0",

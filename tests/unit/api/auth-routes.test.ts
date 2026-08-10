@@ -7,20 +7,26 @@ vi.mock('../../../apps/api/src/lib/auth', () => ({
   EmailAlreadyRegisteredError: class EmailAlreadyRegisteredError extends Error {},
 }))
 
-import { registerUser } from '../../../apps/api/src/lib/auth'
-import { registerHandler } from '../../../apps/api/src/routes/auth'
+import { registerUser, loginUser, InvalidCredentialsError } from '../../../apps/api/src/lib/auth'
+import { registerHandler, loginHandler } from '../../../apps/api/src/routes/auth'
+import { resetRateLimitState } from '../../../apps/api/src/lib/rate-limit'
+import { LOGIN_RATE_LIMIT_MAX } from '../../../apps/api/src/lib/config'
 
 const mockedRegisterUser = registerUser as unknown as ReturnType<typeof vi.fn>
+const mockedLoginUser = loginUser as unknown as ReturnType<typeof vi.fn>
 
 function fakeRes() {
   const res: any = {}
   res.status = vi.fn().mockReturnValue(res)
   res.json = vi.fn().mockReturnValue(res)
+  res.cookie = vi.fn().mockReturnValue(res)
   return res
 }
 
 beforeEach(() => {
   mockedRegisterUser.mockReset()
+  mockedLoginUser.mockReset()
+  resetRateLimitState()
 })
 
 describe('registerHandler', () => {
@@ -37,5 +43,60 @@ describe('registerHandler', () => {
 
     expect(res.status).toHaveBeenCalledWith(409)
     expect(res.json).toHaveBeenCalledWith({ error: 'Email already registered' })
+  })
+})
+
+describe('loginHandler rate limiting', () => {
+  it('returns 401 for each failed attempt up to the limit, then 429 for the next one', async () => {
+    mockedLoginUser.mockRejectedValue(new InvalidCredentialsError())
+    const req: any = { ip: '9.9.9.9', body: { email: 'a@b.com', password: 'wrong' } }
+
+    for (let i = 0; i < LOGIN_RATE_LIMIT_MAX; i++) {
+      const res = fakeRes()
+      await loginHandler(req, res, vi.fn())
+      expect(res.status).toHaveBeenCalledWith(401)
+    }
+
+    // This is the assertion that fails if the limit check is deleted: with
+    // no limiter, this next attempt would also 401 (loginUser keeps
+    // rejecting), never 429.
+    const blockedRes = fakeRes()
+    await loginHandler(req, blockedRes, vi.fn())
+    expect(blockedRes.status).toHaveBeenCalledWith(429)
+    expect(mockedLoginUser).toHaveBeenCalledTimes(LOGIN_RATE_LIMIT_MAX)
+  })
+
+  it('does not consume rate-limit budget on successful logins', async () => {
+    mockedLoginUser.mockResolvedValue({
+      token: 'jwt-token',
+      user: { id: 'u1', email: 'a@b.com', name: 'Ann', role: 'USER' },
+    })
+    const req: any = { ip: '8.8.8.8', body: { email: 'a@b.com', password: 'correct' } }
+
+    // Well beyond the failure limit — since every attempt succeeds, none of
+    // them should count against the budget.
+    for (let i = 0; i < LOGIN_RATE_LIMIT_MAX + 5; i++) {
+      const res = fakeRes()
+      await loginHandler(req, res, vi.fn())
+      expect(res.status).not.toHaveBeenCalledWith(429)
+      expect(res.json).toHaveBeenCalledWith({ user: { id: 'u1', email: 'a@b.com', name: 'Ann', role: 'USER' } })
+    }
+  })
+
+  it('tracks separate IPs independently', async () => {
+    mockedLoginUser.mockRejectedValue(new InvalidCredentialsError())
+    const attacker: any = { ip: '1.1.1.1', body: { email: 'a@b.com', password: 'wrong' } }
+    const bystander: any = { ip: '2.2.2.2', body: { email: 'a@b.com', password: 'wrong' } }
+
+    for (let i = 0; i < LOGIN_RATE_LIMIT_MAX; i++) {
+      await loginHandler(attacker, fakeRes(), vi.fn())
+    }
+    const blockedRes = fakeRes()
+    await loginHandler(attacker, blockedRes, vi.fn())
+    expect(blockedRes.status).toHaveBeenCalledWith(429)
+
+    const bystanderRes = fakeRes()
+    await loginHandler(bystander, bystanderRes, vi.fn())
+    expect(bystanderRes.status).toHaveBeenCalledWith(401)
   })
 })

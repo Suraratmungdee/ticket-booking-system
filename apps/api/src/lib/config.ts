@@ -24,3 +24,11 @@ if (process.env.NODE_ENV === 'production' && !process.env.JWT_SECRET) {
 export const JWT_SECRET = process.env.JWT_SECRET ?? 'dev-secret-change-me'
 
 export const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN ?? 'http://localhost:3000'
+
+// Login brute-force guard (see lib/rate-limit.ts). Only *failed* login
+// attempts consume this budget, so it exists to slow down password
+// guessing, not to throttle legitimate repeat logins. 10 failures per 15
+// minutes is generous for a human mistyping a password a few times, while
+// making online guessing impractical.
+export const LOGIN_RATE_LIMIT_MAX = 10
+export const LOGIN_RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000

@@ -2,6 +2,7 @@ import express from 'express'
 import cors from 'cors'
 import cookieParser from 'cookie-parser'
 import authRouter from './routes/auth.js'
+import eventsRouter from './routes/events.js'
 import { FRONTEND_ORIGIN } from './lib/config.js'
 
 const app = express()
@@ -15,6 +16,7 @@ app.get('/health', (_req, res) => {
 })
 
 app.use('/auth', authRouter)
+app.use('/events', eventsRouter)
 
 const PORT = process.env.PORT ?? 4000
 app.listen(PORT, () => {

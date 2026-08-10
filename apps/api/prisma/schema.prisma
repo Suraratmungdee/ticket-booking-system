@@ -1,0 +1,52 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  USER
+  ADMIN
+}
+
+enum ShowtimeStatus {
+  SCHEDULED
+  CANCELLED
+}
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String
+  name         String
+  role         Role     @default(USER)
+  createdAt    DateTime @default(now())
+}
+
+model Venue {
+  id      String  @id @default(cuid())
+  name    String
+  address String
+  events  Event[]
+}
+
+model Event {
+  id          String     @id @default(cuid())
+  title       String
+  description String
+  venueId     String
+  venue       Venue      @relation(fields: [venueId], references: [id])
+  showtimes   Showtime[]
+}
+
+model Showtime {
+  id        String         @id @default(cuid())
+  eventId   String
+  event     Event          @relation(fields: [eventId], references: [id])
+  startTime DateTime
+  endTime   DateTime
+  status    ShowtimeStatus @default(SCHEDULED)
+}

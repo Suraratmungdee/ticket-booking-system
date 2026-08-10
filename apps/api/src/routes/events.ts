@@ -1,6 +1,7 @@
 import { Router, type RequestHandler } from 'express'
 import { z } from 'zod'
 import { listEvents, getEventById } from '../lib/events.js'
+import { logServerError } from '../lib/log.js'
 
 const router = Router()
 
@@ -28,7 +29,7 @@ export const listEventsHandler: RequestHandler = async (req, res) => {
     })
     return res.json({ events })
   } catch (err) {
-    console.error(err)
+    logServerError('GET /events failed', err)
     return res.status(500).json({ error: 'Internal server error' })
   }
 }
@@ -48,7 +49,7 @@ export const getEventByIdHandler: RequestHandler = async (req, res) => {
     if (!event) return res.status(404).json({ error: 'Event not found' })
     return res.json({ event })
   } catch (err) {
-    console.error(err)
+    logServerError('GET /events/:id failed', err)
     return res.status(500).json({ error: 'Internal server error' })
   }
 }

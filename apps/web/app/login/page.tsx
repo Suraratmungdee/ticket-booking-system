@@ -42,20 +42,32 @@ export default function LoginPage() {
       <h1 className="text-xl font-bold mb-4">เข้าสู่ระบบ</h1>
       {error && <p className="text-red-600 mb-2">{error}</p>}
       <form onSubmit={handleSubmit} className="flex flex-col gap-3">
-        <input
-          name="email"
-          type="email"
-          placeholder="อีเมล"
-          required
-          className="border p-2 rounded"
-        />
-        <input
-          name="password"
-          type="password"
-          placeholder="รหัสผ่าน"
-          required
-          className="border p-2 rounded"
-        />
+        <div className="flex flex-col gap-1">
+          <label htmlFor="login-email" className="text-sm font-medium">
+            อีเมล
+          </label>
+          <input
+            id="login-email"
+            name="email"
+            type="email"
+            placeholder="อีเมล"
+            required
+            className="border p-2 rounded"
+          />
+        </div>
+        <div className="flex flex-col gap-1">
+          <label htmlFor="login-password" className="text-sm font-medium">
+            รหัสผ่าน
+          </label>
+          <input
+            id="login-password"
+            name="password"
+            type="password"
+            placeholder="รหัสผ่าน"
+            required
+            className="border p-2 rounded"
+          />
+        </div>
         <button type="submit" className="bg-black text-white p-2 rounded">
           เข้าสู่ระบบ
         </button>

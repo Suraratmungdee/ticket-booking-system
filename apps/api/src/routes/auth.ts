@@ -8,7 +8,7 @@ import {
 } from '../lib/auth.js'
 import { JWT_COOKIE_NAME, JWT_MAX_AGE_MS, COOKIE_SAME_SITE, COOKIE_SECURE } from '../lib/config.js'
 import { logServerError } from '../lib/log.js'
-import { isRateLimited, recordLoginFailure } from '../lib/rate-limit.js'
+import { isRateLimited, recordLoginFailure, refundAttempt } from '../lib/rate-limit.js'
 
 const router = Router()
 
@@ -55,8 +55,10 @@ const loginSchema = z.object({
 // Exported (not just mounted) so unit tests can call it directly, same
 // pattern as registerHandler above.
 export const loginHandler: RequestHandler = async (req, res) => {
-  // req.ip is undefined only in contrived test setups (no socket) — fall
-  // back to a fixed key so those still share one bucket rather than crash.
+  // req.ip is undefined when there's no usable socket to read an address
+  // from — a destroyed/aborted connection in production, not just test
+  // fakes — fall back to a fixed key so those still share one bucket
+  // rather than crash.
   const key = req.ip ?? 'unknown'
   if (isRateLimited(key)) {
     return res.status(429).json({ error: 'Too many login attempts. Please try again later.' })
@@ -67,8 +69,18 @@ export const loginHandler: RequestHandler = async (req, res) => {
     return res.status(400).json({ error: parsed.error.flatten() })
   }
 
+  // Reserve budget synchronously, before the `await` below — not after it
+  // resolves. Incrementing only post-await let every request in a
+  // concurrent burst read the same pre-increment count and slip through
+  // the gate for free (the count-then-act race); reserving here closes
+  // that because it happens in the same synchronous tick as the
+  // isRateLimited() check above, before this call can be interleaved with
+  // any other. Refunded below if the login actually succeeds.
+  recordLoginFailure(key)
+
   try {
     const { token, user } = await loginUser(parsed.data)
+    refundAttempt(key)
     res.cookie(JWT_COOKIE_NAME, token, {
       httpOnly: true,
       secure: COOKIE_SECURE,
@@ -78,10 +90,12 @@ export const loginHandler: RequestHandler = async (req, res) => {
     return res.json({ user })
   } catch (err) {
     if (err instanceof InvalidCredentialsError) {
-      // Only failed attempts consume rate-limit budget — see rate-limit.ts.
-      recordLoginFailure(key)
+      // Genuine failed guess — keep the reservation made above.
       return res.status(401).json({ error: 'Invalid email or password' })
     }
+    // Not a credential guess (e.g. a DB error) — don't charge it against
+    // the login budget.
+    refundAttempt(key)
     logServerError('POST /auth/login failed', err)
     return res.status(500).json({ error: 'Internal server error' })
   }

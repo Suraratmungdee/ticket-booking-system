@@ -27,8 +27,23 @@ export const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN ?? 'http://localhost:
 
 // Login brute-force guard (see lib/rate-limit.ts). Only *failed* login
 // attempts consume this budget, so it exists to slow down password
-// guessing, not to throttle legitimate repeat logins. 10 failures per 15
-// minutes is generous for a human mistyping a password a few times, while
-// making online guessing impractical.
-export const LOGIN_RATE_LIMIT_MAX = 10
+// guessing, not to throttle legitimate repeat logins. Humans rarely need
+// more than 4-5 tries to get their own password right, but a bigger number
+// is a real gift to an attacker: at 10 failures / 15 min an attacker gets
+// 960 guesses/day/IP — against an 8-char-minimum policy with no complexity
+// or breach-list check, that's enough to walk a top-100 password list
+// against one account in about 2.5 hours. 5 keeps that budget tight while
+// still fitting a human's usual mistyped-password count.
+export const LOGIN_RATE_LIMIT_MAX = 5
 export const LOGIN_RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000
+
+// Opt-in only: when true, Express trusts the `X-Forwarded-For` header (via
+// `app.set('trust proxy', ...)` in index.ts) so req.ip reflects the real
+// client behind a reverse proxy instead of the proxy's own address. Off by
+// default because trusting that header when there is NO proxy in front lets
+// any client set it themselves and pick a fresh IP per request, bypassing
+// the login rate limiter entirely. Only flip this on for a deploy that
+// actually terminates TLS at a proxy (nearly every PaaS does) — see the
+// LIMITATION comment on recordLoginFailure in lib/rate-limit.ts for what
+// happens if you deploy behind one with this left off.
+export const TRUST_PROXY = process.env.TRUST_PROXY === 'true'

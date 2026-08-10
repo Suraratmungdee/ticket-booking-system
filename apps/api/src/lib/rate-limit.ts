@@ -10,11 +10,16 @@ function isExpired(entry: Entry, now: number): boolean {
   return now - entry.windowStart >= LOGIN_RATE_LIMIT_WINDOW_MS
 }
 
-// Sweeps entries whose window has already elapsed. Runs inline on every
-// call instead of a timer/interval — login traffic is small enough that an
-// O(n) scan over the map is cheap, and it avoids managing a timer's
-// lifecycle (clearing it on shutdown, in tests, etc). This is what keeps
-// the Map from growing without bound as distinct IPs churn through.
+// Sweeps entries whose window has already elapsed.
+//
+// ponytail: this bounds *retention* (a key can't outlive one window past
+// its last write), not *size* — within a single window every distinct IP
+// with a failed login gets an entry, so one attacker rotating through many
+// IPv6 addresses can still grow the Map arbitrarily large during that
+// window. The scan itself is also O(map size) on every call, so heavy
+// distinct-IP traffic is quadratic. Fine at login-endpoint scale for a
+// single Phase-1 instance; move to Redis (with TTL-based expiry) if either
+// becomes real.
 function sweep(now: number): void {
   for (const [key, entry] of attempts) {
     if (isExpired(entry, now)) attempts.delete(key)
@@ -23,28 +28,35 @@ function sweep(now: number): void {
 
 // True when `key` has already used up its budget for the current window —
 // the caller should reject with 429 without even attempting the login.
-// Checking does not itself consume budget; call recordLoginFailure() after
-// an actual failed login to do that.
+// Checks expiry itself (does not rely on sweep() having run first) so a
+// stale entry can never read as still-limited.
 export function isRateLimited(key: string): boolean {
   const now = Date.now()
   sweep(now)
   const entry = attempts.get(key)
-  if (!entry) return false
+  if (!entry || isExpired(entry, now)) return false
   return entry.count >= LOGIN_RATE_LIMIT_MAX
 }
 
-// Counts one failed login attempt against `key`. Only failures are counted
-// (see auth.ts) so a burst of successful logins — e.g. several people
-// behind one office NAT, or a user's own retries after fixing a typo —
-// never trips the limiter; only repeated bad passwords do.
+// Reserves one unit of budget against `key` *before* the login attempt
+// runs (see auth.ts: called synchronously with the isRateLimited() check,
+// before the `await loginUser(...)`). This closes the check-then-act race
+// where concurrent requests all read the same pre-increment count and none
+// of them see the others' attempts — the reservation must land before any
+// await, or a parallel burst sails through the gate for free.
 //
-// LIMITATION: keyed on req.ip, which Express only derives from
-// X-Forwarded-For when `trust proxy` is enabled — it isn't here, so behind
-// a reverse proxy in production every request would arrive as the proxy's
-// IP and share one bucket. The Map is also in-memory only: state resets on
-// restart and is not shared across multiple API instances. Both are fine
-// for a single-instance Phase 1 deploy; upgrade to Redis (already planned
-// for Phase 2 seat locks) if either a proxy or horizontal scaling shows up.
+// LIMITATION: keyed on req.ip. Express only derives req.ip from
+// X-Forwarded-For when `trust proxy` is enabled (config.ts's TRUST_PROXY,
+// default off). Left off, every request behind a reverse proxy arrives as
+// the proxy's single IP — meaning 10 wrong passwords from ONE attacker
+// shares that bucket with every other user behind the same proxy and locks
+// ALL of them out of login for 15 minutes. That's the realistic first-deploy
+// outcome, since virtually every PaaS terminates TLS at a proxy. Turning
+// TRUST_PROXY on fixes it, but only do that when an actual trusted proxy
+// sits in front (otherwise a client can spoof X-Forwarded-For and dodge the
+// limiter entirely — see index.ts). The Map is also in-memory only: state
+// resets on restart and isn't shared across multiple API instances. Redis
+// (already planned for Phase 2 seat locks) is the upgrade path for that.
 export function recordLoginFailure(key: string): void {
   const now = Date.now()
   const entry = attempts.get(key)
@@ -53,6 +65,14 @@ export function recordLoginFailure(key: string): void {
     return
   }
   entry.count += 1
+}
+
+// Refunds one unit of budget previously reserved by recordLoginFailure().
+// Called after a login that turned out to succeed, so only genuine
+// failures end up counted — see auth.ts.
+export function refundAttempt(key: string): void {
+  const entry = attempts.get(key)
+  if (entry && entry.count > 0) entry.count -= 1
 }
 
 // Test-only: clears all state so tests don't leak into each other.

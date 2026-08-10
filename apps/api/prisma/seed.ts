@@ -3,6 +3,10 @@ import { prisma } from '../src/lib/prisma.js'
 // Two venues, three events, one showtime each — enough to exercise the
 // /events date and venue filters by hand. Idempotent: clears first.
 async function main() {
+  await prisma.bookingSeat.deleteMany()
+  await prisma.booking.deleteMany()
+  await prisma.seat.deleteMany()
+  await prisma.seatMap.deleteMany()
   await prisma.showtime.deleteMany()
   await prisma.event.deleteMany()
   await prisma.venue.deleteMany()
@@ -58,6 +62,33 @@ async function main() {
   const venues = await prisma.venue.findMany({ select: { id: true, name: true } })
   console.log('Seeded. Venue ids for filter testing:')
   for (const v of venues) console.log(`  ${v.id}  ${v.name}`)
+
+  const ZONES = [
+    { zoneName: 'VIP', price: 3500 },
+    { zoneName: 'ธรรมดา', price: 2000 },
+    { zoneName: 'ยืน', price: 1200 },
+  ]
+  const ROWS = ['A', 'B', 'C', 'D', 'E']
+  const SEATS_PER_ROW = 6
+
+  const showtimes = await prisma.showtime.findMany({ select: { id: true } })
+  for (const showtime of showtimes) {
+    for (const zone of ZONES) {
+      await prisma.seatMap.create({
+        data: {
+          showtimeId: showtime.id,
+          zoneName: zone.zoneName,
+          price: zone.price,
+          seats: {
+            create: ROWS.flatMap((row) =>
+              Array.from({ length: SEATS_PER_ROW }, (_, i) => ({ row, number: i + 1 })),
+            ),
+          },
+        },
+      })
+    }
+  }
+  console.log(`Seeded ${showtimes.length} showtimes x ${ZONES.length} zones x ${ROWS.length * SEATS_PER_ROW} seats`)
 }
 
 main()

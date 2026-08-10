@@ -35,6 +35,7 @@ vi.mock('../../../apps/api/src/lib/prisma', () => ({
 
 import {
   createBooking,
+  expireStaleBookings,
   getBookingForUser,
   SeatUnavailableError,
   TooManySeatsError,
@@ -56,6 +57,15 @@ describe('createBooking', () => {
     await expect(
       createBooking({ userId: 'u1', showtimeId: 'st1', seatIds: Array.from({ length: 9 }, (_, i) => `s${i}`) }),
     ).rejects.toThrow(TooManySeatsError)
+
+    expect(mockAcquire).not.toHaveBeenCalled()
+    expect(mockTransaction).not.toHaveBeenCalled()
+  })
+
+  it('rejects an empty seat list before touching Redis or the DB', async () => {
+    await expect(createBooking({ userId: 'u1', showtimeId: 'st1', seatIds: [] })).rejects.toThrow(
+      TooManySeatsError,
+    )
 
     expect(mockAcquire).not.toHaveBeenCalled()
     expect(mockTransaction).not.toHaveBeenCalled()
@@ -86,6 +96,19 @@ describe('createBooking', () => {
     expect(mockRelease).toHaveBeenCalledWith(['s1'])
   })
 
+  // Narrowing the catch to only release on SeatUnavailableError would leave
+  // this fully green while stranding seats in Redis for the full TTL after
+  // a connection drop or any other DB failure.
+  it('releases the Redis holds when the DB fails for any other reason', async () => {
+    txRuns({ $queryRaw: vi.fn().mockRejectedValue(new Error('connection lost')) })
+
+    await expect(createBooking({ userId: 'u1', showtimeId: 'st1', seatIds: ['s1'] })).rejects.toThrow(
+      'connection lost',
+    )
+
+    expect(mockRelease).toHaveBeenCalledWith(['s1'])
+  })
+
   it('computes totalPrice from the DB rows, not from anything the caller supplied', async () => {
     const create = vi.fn().mockResolvedValue({ id: 'b1' })
     txRuns({
@@ -97,7 +120,9 @@ describe('createBooking', () => {
       booking: { create },
     })
 
-    await createBooking({ userId: 'u1', showtimeId: 'st1', seatIds: ['s1', 's2'] })
+    // A bogus `price` on the input must have zero influence — totalPrice is
+    // asserted below to still be the DB-derived 4700, not 999999.
+    await createBooking({ userId: 'u1', showtimeId: 'st1', seatIds: ['s1', 's2'], price: 999999 } as never)
 
     expect(create).toHaveBeenCalledWith(
       expect.objectContaining({ data: expect.objectContaining({ totalPrice: 4700 }) }),
@@ -115,6 +140,75 @@ describe('createBooking', () => {
       createBooking({ userId: 'u1', showtimeId: 'st1', seatIds: ['s1'] }),
     ).rejects.toThrow(SeatUnavailableError)
     expect(mockRelease).toHaveBeenCalled()
+  })
+})
+
+describe('expireStaleBookings', () => {
+  function txExpire(bookingUpdateCount = 1) {
+    const findMany = vi.fn().mockResolvedValue([{ id: 'b1', seats: [{ seatId: 's1' }, { seatId: 's2' }] }])
+    const bookingUpdateMany = vi.fn().mockResolvedValue({ count: bookingUpdateCount })
+    const seatUpdateMany = vi.fn().mockResolvedValue({ count: 2 })
+    txRuns({ booking: { findMany, updateMany: bookingUpdateMany }, seat: { updateMany: seatUpdateMany } })
+    return { findMany, bookingUpdateMany, seatUpdateMany }
+  }
+
+  it('queries only PENDING_PAYMENT bookings past their expiry, leaving others alone', async () => {
+    const { findMany } = txExpire()
+
+    await expireStaleBookings()
+
+    expect(findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          status: 'PENDING_PAYMENT',
+          expiresAt: expect.objectContaining({ lt: expect.any(Date) }),
+        }),
+      }),
+    )
+  })
+
+  it('returns the expired bookings\' seats to AVAILABLE and reports the count', async () => {
+    const { bookingUpdateMany, seatUpdateMany } = txExpire()
+
+    const count = await expireStaleBookings()
+
+    expect(bookingUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: expect.objectContaining({ status: 'PENDING_PAYMENT' }) }),
+    )
+    expect(seatUpdateMany).toHaveBeenCalledWith({
+      where: { id: { in: ['s1', 's2'] }, status: 'BOOKED' },
+      data: { status: 'AVAILABLE' },
+    })
+    expect(count).toBe(1)
+  })
+
+  // Pins the fix for the double-book hole: a booking that a concurrent sweep
+  // (or a payment) already moved out of PENDING_PAYMENT must not be
+  // re-expired, and its seats must not be freed out from under whoever
+  // holds them now. The guarded `booking.updateMany` matches 0 rows in that
+  // case. This test fails against the old unguarded version, which ran the
+  // seat update unconditionally and always returned `stale.length`
+  // regardless of how many bookings the update actually touched.
+  it('does not free seats when the guarded booking update matches nothing', async () => {
+    const { seatUpdateMany } = txExpire(0)
+
+    const count = await expireStaleBookings()
+
+    expect(seatUpdateMany).not.toHaveBeenCalled()
+    expect(count).toBe(0)
+  })
+
+  it('does nothing when there are no stale bookings', async () => {
+    const findMany = vi.fn().mockResolvedValue([])
+    const bookingUpdateMany = vi.fn()
+    const seatUpdateMany = vi.fn()
+    txRuns({ booking: { findMany, updateMany: bookingUpdateMany }, seat: { updateMany: seatUpdateMany } })
+
+    const count = await expireStaleBookings()
+
+    expect(count).toBe(0)
+    expect(bookingUpdateMany).not.toHaveBeenCalled()
+    expect(seatUpdateMany).not.toHaveBeenCalled()
   })
 })
 

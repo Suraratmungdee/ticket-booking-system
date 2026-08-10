@@ -1,11 +1,9 @@
-import { Prisma } from '@prisma/client'
 import { prisma } from './prisma.js'
 import { acquireSeatHolds, releaseSeatHolds } from './seat-lock.js'
 import { MAX_SEATS_PER_BOOKING, SEAT_HOLD_TTL_SECONDS } from './config.js'
 
 export class SeatUnavailableError extends Error {}
 export class TooManySeatsError extends Error {}
-export class SeatsNotInShowtimeError extends Error {}
 
 type LockedSeat = { id: string; status: string; price: number; showtimeId: string }
 
@@ -14,7 +12,7 @@ export async function createBooking(input: {
   showtimeId: string
   seatIds: string[]
 }) {
-  if (input.seatIds.length > MAX_SEATS_PER_BOOKING) throw new TooManySeatsError()
+  if (input.seatIds.length < 1 || input.seatIds.length > MAX_SEATS_PER_BOOKING) throw new TooManySeatsError()
 
   // First gate: cheap, fast, and keeps most contenders out of the DB.
   const held = await acquireSeatHolds(input.seatIds, input.userId)
@@ -68,9 +66,6 @@ export async function createBooking(input: {
     // Whatever went wrong, don't leave the seats locked in Redis for 5
     // minutes — nobody holds a booking for them.
     await releaseSeatHolds(input.seatIds)
-    if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
-      throw new SeatUnavailableError()
-    }
     throw err
   }
 }
@@ -91,14 +86,26 @@ export async function expireStaleBookings(): Promise<number> {
 
     const seatIds = stale.flatMap((b) => b.seats.map((s) => s.seatId))
 
-    // Both updates in one transaction. Split them and a crash in between
-    // leaves the booking expired while its seats stay BOOKED forever.
-    await tx.seat.updateMany({ where: { id: { in: seatIds } }, data: { status: 'AVAILABLE' } })
-    await tx.booking.updateMany({
-      where: { id: { in: stale.map((b) => b.id) } },
+    // Booking update goes first, guarded on status still being
+    // PENDING_PAYMENT. Two concurrent sweeps can both read the same stale
+    // booking before either writes; without the guard, a sweep that read
+    // stale would free seats a *new* booking has since legitimately taken
+    // (booking B expires, seat frees, booking C legitimately takes it, the
+    // other stale sweep then frees the seat out from under C). The guarded
+    // update makes the second sweep match 0 rows once the first commits, so
+    // it returns before touching any seat. `status: 'BOOKED'` on the seat
+    // update is belt-and-braces for the same reason.
+    const expired = await tx.booking.updateMany({
+      where: { id: { in: stale.map((b) => b.id) }, status: 'PENDING_PAYMENT' },
       data: { status: 'EXPIRED' },
     })
-    return stale.length
+    if (expired.count === 0) return 0
+
+    await tx.seat.updateMany({
+      where: { id: { in: seatIds }, status: 'BOOKED' },
+      data: { status: 'AVAILABLE' },
+    })
+    return expired.count
   })
 }
 

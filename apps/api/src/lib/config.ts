@@ -1,5 +1,7 @@
 export const BCRYPT_SALT_ROUNDS = 10
-export const JWT_EXPIRES_IN = '2h'
+// Single source of truth for session length: both the JWT expiry and the
+// cookie maxAge derive from this so they cannot drift apart.
+export const JWT_MAX_AGE_MS = 2 * 60 * 60 * 1000
 export const JWT_COOKIE_NAME = 'token'
 
 // LIMITATION: falls back to a dev-only secret so local boot never crashes;

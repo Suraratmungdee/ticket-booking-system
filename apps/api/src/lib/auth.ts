@@ -1,7 +1,7 @@
 import bcrypt from 'bcrypt'
 import jwt from 'jsonwebtoken'
 import { prisma } from './prisma.js'
-import { BCRYPT_SALT_ROUNDS, JWT_SECRET, JWT_EXPIRES_IN } from './config.js'
+import { BCRYPT_SALT_ROUNDS, JWT_SECRET, JWT_MAX_AGE_MS } from './config.js'
 
 export class InvalidCredentialsError extends Error {}
 export class EmailAlreadyRegisteredError extends Error {}
@@ -42,8 +42,9 @@ export async function loginUser(input: {
   const valid = await bcrypt.compare(input.password, user.passwordHash)
   if (!valid) throw new InvalidCredentialsError()
 
+  // jsonwebtoken's expiresIn takes seconds; derive from the single ms constant.
   const token = jwt.sign({ sub: user.id, role: user.role }, JWT_SECRET, {
-    expiresIn: JWT_EXPIRES_IN,
+    expiresIn: JWT_MAX_AGE_MS / 1000,
   })
   return { token, user: toPublicUser(user) }
 }

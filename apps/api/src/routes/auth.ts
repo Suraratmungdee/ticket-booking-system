@@ -1,4 +1,4 @@
-import { Router } from 'express'
+import { Router, type RequestHandler } from 'express'
 import { z } from 'zod'
 import {
   registerUser,
@@ -6,7 +6,7 @@ import {
   InvalidCredentialsError,
   EmailAlreadyRegisteredError,
 } from '../lib/auth.js'
-import { JWT_COOKIE_NAME } from '../lib/config.js'
+import { JWT_COOKIE_NAME, JWT_MAX_AGE_MS } from '../lib/config.js'
 
 const router = Router()
 
@@ -16,7 +16,9 @@ const registerSchema = z.object({
   name: z.string().min(1),
 })
 
-router.post('/register', async (req, res) => {
+// Exported (not just mounted) so unit tests can call it directly with a
+// fake req/res, without adding an HTTP test dependency like supertest.
+export const registerHandler: RequestHandler = async (req, res) => {
   const parsed = registerSchema.safeParse(req.body)
   if (!parsed.success) {
     return res.status(400).json({ error: parsed.error.flatten() })
@@ -39,7 +41,9 @@ router.post('/register', async (req, res) => {
     console.error(err)
     return res.status(500).json({ error: 'Internal server error' })
   }
-})
+}
+
+router.post('/register', registerHandler)
 
 const loginSchema = z.object({
   email: z.string().email(),
@@ -58,7 +62,7 @@ router.post('/login', async (req, res) => {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
       sameSite: 'lax',
-      maxAge: 2 * 60 * 60 * 1000,
+      maxAge: JWT_MAX_AGE_MS,
     })
     return res.json({ user })
   } catch (err) {

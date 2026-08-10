@@ -63,6 +63,41 @@ describe('loginHandler rate limiting', () => {
     const blockedRes = fakeRes()
     await loginHandler(req, blockedRes, vi.fn())
     expect(blockedRes.status).toHaveBeenCalledWith(429)
+    // Exact body, not just the status — pins the "no remaining-attempts /
+    // retry-timing leak" requirement. A body mutated to include a count or
+    // a retry-after value would still pass a status-only assertion.
+    expect(blockedRes.json).toHaveBeenCalledWith({
+      error: 'Too many login attempts. Please try again later.',
+    })
+    expect(mockedLoginUser).toHaveBeenCalledTimes(LOGIN_RATE_LIMIT_MAX)
+  })
+
+  it('caps a concurrent burst at the limit instead of letting every parallel request through', async () => {
+    // Regression test for the check-then-act race: firing requests
+    // sequentially (like the test above) can never see this bug, because
+    // the increment always lands before the next request's check runs. A
+    // real concurrent burst is the only shape that exercises it — with the
+    // old post-await increment, every request in the burst reads the same
+    // pre-increment count and none of them observe each other's attempts,
+    // so the whole burst reaches loginUser and none get 429.
+    mockedLoginUser.mockRejectedValue(new InvalidCredentialsError())
+    const req: any = { ip: '3.3.3.3', body: { email: 'a@b.com', password: 'wrong' } }
+    const burstSize = LOGIN_RATE_LIMIT_MAX * 4
+
+    const responses = await Promise.all(
+      Array.from({ length: burstSize }, async () => {
+        const res = fakeRes()
+        await loginHandler(req, res, vi.fn())
+        return res
+      }),
+    )
+
+    const statusesUsed = responses.map((res) => res.status.mock.calls[0][0])
+    const blocked429 = statusesUsed.filter((s) => s === 429).length
+    const reachedDb = statusesUsed.filter((s) => s === 401).length
+
+    expect(reachedDb).toBe(LOGIN_RATE_LIMIT_MAX)
+    expect(blocked429).toBe(burstSize - LOGIN_RATE_LIMIT_MAX)
     expect(mockedLoginUser).toHaveBeenCalledTimes(LOGIN_RATE_LIMIT_MAX)
   })
 
@@ -94,6 +129,9 @@ describe('loginHandler rate limiting', () => {
     const blockedRes = fakeRes()
     await loginHandler(attacker, blockedRes, vi.fn())
     expect(blockedRes.status).toHaveBeenCalledWith(429)
+    expect(blockedRes.json).toHaveBeenCalledWith({
+      error: 'Too many login attempts. Please try again later.',
+    })
 
     const bystanderRes = fakeRes()
     await loginHandler(bystander, bystanderRes, vi.fn())

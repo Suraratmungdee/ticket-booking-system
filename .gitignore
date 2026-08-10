@@ -6,3 +6,4 @@ apps/api/dist/
 apps/api/node_modules/
 apps/web/.next/
 apps/web/node_modules/
+*.tsbuildinfo

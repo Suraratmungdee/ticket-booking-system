@@ -1,0 +1,11 @@
+{
+  "name": "ticket-booking-system",
+  "private": true,
+  "workspaces": ["apps/*"],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "dev:api": "npm run dev --workspace apps/api",
+    "dev:web": "npm run dev --workspace apps/web"
+  }
+}

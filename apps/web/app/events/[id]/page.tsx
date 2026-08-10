@@ -17,6 +17,12 @@ async function fetchEvent(id: string): Promise<EventDetail | null> {
   if (res.status === 404) return null
   if (!res.ok) throw new Error(`GET /events/${id} failed with status ${res.status}`)
   const data = await res.json()
+  // A 200 body without a usable `event` object is a backend bug, not a
+  // "not found" — throw so it takes the error-message path below instead of
+  // being treated as null and reaching notFound() for the wrong reason.
+  if (typeof data.event !== 'object' || data.event === null) {
+    throw new Error(`GET /events/${id} returned a malformed body`)
+  }
   return data.event as EventDetail
 }
 

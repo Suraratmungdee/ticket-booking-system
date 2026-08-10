@@ -1,6 +1,5 @@
 import Link from 'next/link'
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:4000'
+import { API_URL } from '../../lib/api'
 
 type EventListItem = {
   id: string
@@ -25,7 +24,7 @@ async function fetchEvents(searchParams: { date?: string; venueId?: string }): P
       return null
     }
     const data = await res.json()
-    return data.events as EventListItem[]
+    return Array.isArray(data.events) ? data.events : null
   } catch (err) {
     console.error('GET /events failed', err)
     return null

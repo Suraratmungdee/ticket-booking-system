@@ -1,5 +1,9 @@
 import { prisma } from './prisma.js'
 
+// LIMITATION: no `take`/pagination — returns every matching event with every
+// showtime included, unbounded. Fine while the catalog is small; add
+// cursor-based pagination (and drop the eager `showtimes` include in favor of
+// a per-event fetch) once event/showtime counts grow large enough to matter.
 export async function listEvents(filters: { date?: string; venueId?: string }) {
   return prisma.event.findMany({
     where: {

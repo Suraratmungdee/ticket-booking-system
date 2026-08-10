@@ -77,6 +77,19 @@ describe('listEventsHandler', () => {
     expect(res.status).toHaveBeenCalledWith(400)
     expect(mockedFindMany).not.toHaveBeenCalled()
   })
+
+  it('returns 400 for a full ISO timestamp instead of hitting the database', async () => {
+    // dayRange() interpolates the raw string into `${date}T00:00:00.000Z` —
+    // a full timestamp like this produces an invalid date and must be
+    // rejected by the guard before it ever reaches Prisma.
+    const req: any = { query: { date: '2026-08-10T10:00:00Z' } }
+    const res = fakeRes()
+
+    await listEventsHandler(req, res, vi.fn())
+
+    expect(res.status).toHaveBeenCalledWith(400)
+    expect(mockedFindMany).not.toHaveBeenCalled()
+  })
 })
 
 describe('getEventByIdHandler', () => {

@@ -6,9 +6,21 @@ import {
   InvalidCredentialsError,
   EmailAlreadyRegisteredError,
 } from '../lib/auth.js'
-import { JWT_COOKIE_NAME, JWT_MAX_AGE_MS } from '../lib/config.js'
+import { JWT_COOKIE_NAME, JWT_MAX_AGE_MS, COOKIE_SAME_SITE, COOKIE_SECURE } from '../lib/config.js'
 
 const router = Router()
+
+// console.error(err) on a raw Prisma error would print its full message,
+// which for validation errors echoes the `data` argument (including
+// passwordHash — the bcrypt hash, not the plaintext, but still no reason to
+// log it). Log only the bits useful for debugging instead of the whole object.
+function logServerError(context: string, err: unknown) {
+  const info =
+    typeof err === 'object' && err !== null
+      ? { code: (err as { code?: unknown }).code, message: (err as { message?: unknown }).message }
+      : err
+  console.error(context, info)
+}
 
 const registerSchema = z.object({
   email: z.string().email(),
@@ -38,7 +50,7 @@ export const registerHandler: RequestHandler = async (req, res) => {
     ) {
       return res.status(409).json({ error: 'Email already registered' })
     }
-    console.error(err)
+    logServerError('POST /auth/register failed', err)
     return res.status(500).json({ error: 'Internal server error' })
   }
 }
@@ -60,8 +72,8 @@ router.post('/login', async (req, res) => {
     const { token, user } = await loginUser(parsed.data)
     res.cookie(JWT_COOKIE_NAME, token, {
       httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: 'lax',
+      secure: COOKIE_SECURE,
+      sameSite: COOKIE_SAME_SITE,
       maxAge: JWT_MAX_AGE_MS,
     })
     return res.json({ user })
@@ -69,7 +81,7 @@ router.post('/login', async (req, res) => {
     if (err instanceof InvalidCredentialsError) {
       return res.status(401).json({ error: 'Invalid email or password' })
     }
-    console.error(err)
+    logServerError('POST /auth/login failed', err)
     return res.status(500).json({ error: 'Internal server error' })
   }
 })

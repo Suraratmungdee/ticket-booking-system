@@ -4,11 +4,12 @@ import { listEvents, getEventById } from '../lib/events.js'
 
 const router = Router()
 
-// Guards against `new Date('banana...')` -> Invalid Date reaching Prisma,
-// which would throw and surface as a 500 for what is really a bad request.
-const dateQuerySchema = z.string().refine((v) => !Number.isNaN(Date.parse(v)), {
-  message: 'Invalid date',
-})
+// Must match exactly what lib/events.ts's dayRange() assumes: a bare
+// YYYY-MM-DD string (it interpolates this directly into `${date}T00:00:00.000Z`).
+// z.string().refine(Date.parse) was too permissive — it let through full ISO
+// timestamps, free-form dates, and bare years, all of which either crash
+// dayRange's Date constructor or silently produce the wrong range.
+const dateQuerySchema = z.iso.date()
 
 export const listEventsHandler: RequestHandler = async (req, res) => {
   const { date, venueId } = req.query

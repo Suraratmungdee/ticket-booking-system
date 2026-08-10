@@ -13,13 +13,20 @@ export default function LoginPage() {
     setError(null)
     const form = new FormData(e.currentTarget)
 
-    const res = await apiFetch('/auth/login', {
-      method: 'POST',
-      body: JSON.stringify({
-        email: form.get('email'),
-        password: form.get('password'),
-      }),
-    })
+    let res: Response
+    try {
+      res = await apiFetch('/auth/login', {
+        method: 'POST',
+        body: JSON.stringify({
+          email: form.get('email'),
+          password: form.get('password'),
+        }),
+      })
+    } catch (err) {
+      console.error(err)
+      setError('เชื่อมต่อเซิร์ฟเวอร์ไม่สำเร็จ กรุณาลองใหม่อีกครั้ง')
+      return
+    }
 
     if (!res.ok) {
       const data = await res.json().catch(() => ({}))

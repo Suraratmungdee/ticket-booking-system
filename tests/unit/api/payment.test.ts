@@ -4,14 +4,14 @@ const m = vi.hoisted(() => ({
   bookingFindFirst: vi.fn(),
   paymentFindUnique: vi.fn(),
   paymentCreate: vi.fn(),
-  paymentUpdate: vi.fn(),
+  paymentUpdateMany: vi.fn(),
   transaction: vi.fn(),
 }))
 
 vi.mock('../../../apps/api/src/lib/prisma', () => ({
   prisma: {
     booking: { findFirst: m.bookingFindFirst },
-    payment: { findUnique: m.paymentFindUnique, create: m.paymentCreate, update: m.paymentUpdate },
+    payment: { findUnique: m.paymentFindUnique, create: m.paymentCreate, updateMany: m.paymentUpdateMany },
     $transaction: m.transaction,
   },
 }))
@@ -105,20 +105,23 @@ describe('createCheckoutSession', () => {
       amount: 4700,
       status: 'FAILED',
     })
-    m.paymentUpdate.mockResolvedValue({ providerRef: 'ref_new', amount: 4700 })
+    m.paymentUpdateMany.mockResolvedValue({ count: 1 })
 
     const result = await createCheckoutSession('b1', 'u1')
 
-    expect(result.providerRef).toBe('ref_new')
+    expect(result.providerRef).toMatch(/^sess_/)
     expect(m.paymentCreate).not.toHaveBeenCalled()
-    expect(m.paymentUpdate).toHaveBeenCalledWith(
+    expect(m.paymentUpdateMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: { bookingId: 'b1' },
+        // The compare half of compare-and-swap: only a row still FAILED may
+        // be reset, or two concurrent retries could both "succeed".
+        where: { bookingId: 'b1', status: 'FAILED' },
         data: expect.objectContaining({ status: 'PENDING', amount: 4700 }),
       }),
     )
     // The retry must not reuse the ref a stale delivery could still land on.
-    expect(m.paymentUpdate.mock.calls[0][0].data.providerRef).not.toBe('ref_old_failed')
+    expect(m.paymentUpdateMany.mock.calls[0][0].data.providerRef).not.toBe('ref_old_failed')
+    expect(result.providerRef).toBe(m.paymentUpdateMany.mock.calls[0][0].data.providerRef)
   })
 
   it('rejects starting a new session when the payment already succeeded', async () => {
@@ -136,7 +139,55 @@ describe('createCheckoutSession', () => {
 
     await expect(createCheckoutSession('b1', 'u1')).rejects.toThrow(BookingNotPayableError)
     expect(m.paymentCreate).not.toHaveBeenCalled()
-    expect(m.paymentUpdate).not.toHaveBeenCalled()
+    expect(m.paymentUpdateMany).not.toHaveBeenCalled()
+  })
+
+  // Two concurrent retries both read status: 'FAILED'; only one updateMany
+  // can match the `status: 'FAILED'` predicate once the other has already
+  // flipped the row to PENDING. The loser must hand back the row that is
+  // actually there, not the ref it minted and never wrote.
+  it('returns the winning row when a concurrent FAILED-reset loses the compare-and-swap', async () => {
+    m.bookingFindFirst.mockResolvedValue({
+      id: 'b1',
+      status: 'PENDING_PAYMENT',
+      totalPrice: 4700,
+      expiresAt: new Date(Date.now() + 60_000),
+    })
+    m.paymentFindUnique
+      .mockResolvedValueOnce({ providerRef: 'ref_old_failed', amount: 4700, status: 'FAILED' })
+      .mockResolvedValueOnce({ providerRef: 'ref_winner', amount: 4700, status: 'PENDING' })
+    m.paymentUpdateMany.mockResolvedValue({ count: 0 })
+
+    const result = await createCheckoutSession('b1', 'u1')
+
+    // The where clause is the compare half of the swap — without a
+    // status: 'FAILED' predicate there is nothing to make this race safe,
+    // so pin it down directly rather than only asserting the outcome.
+    expect(m.paymentUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { bookingId: 'b1', status: 'FAILED' } }),
+    )
+    expect(result.providerRef).toBe('ref_winner')
+    expect(result.providerRef).not.toBe(m.paymentUpdateMany.mock.calls[0][0].data.providerRef)
+  })
+
+  // Same race, but the other side won by landing a success — the reset must
+  // not resurrect a SUCCEEDED payment back to PENDING.
+  it('rejects the FAILED-reset when a concurrent success won the compare-and-swap', async () => {
+    m.bookingFindFirst.mockResolvedValue({
+      id: 'b1',
+      status: 'PENDING_PAYMENT',
+      totalPrice: 4700,
+      expiresAt: new Date(Date.now() + 60_000),
+    })
+    m.paymentFindUnique
+      .mockResolvedValueOnce({ providerRef: 'ref_old_failed', amount: 4700, status: 'FAILED' })
+      .mockResolvedValueOnce({ providerRef: 'ref_succeeded', amount: 4700, status: 'SUCCEEDED' })
+    m.paymentUpdateMany.mockResolvedValue({ count: 0 })
+
+    await expect(createCheckoutSession('b1', 'u1')).rejects.toThrow(BookingNotPayableError)
+    expect(m.paymentUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { bookingId: 'b1', status: 'FAILED' } }),
+    )
   })
 
   // Two simultaneous "pay" clicks: both read `existing` as null and both

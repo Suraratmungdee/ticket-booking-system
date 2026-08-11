@@ -33,17 +33,33 @@ export async function createCheckoutSession(bookingId: string, userId: string) {
     // providerRef matters: the old ref may already have a WebhookEvent
     // recorded against it, and reusing it would let a stale delivery apply
     // to this retry.
-    const reset = await prisma.payment.update({
-      where: { bookingId },
+    //
+    // updateMany (not update) with status: 'FAILED' in the where is the
+    // compare half of a compare-and-swap — `update` has no way to condition
+    // on anything but the unique key, so an unconditioned write here would
+    // let two concurrent retries both succeed (last write wins, the loser's
+    // minted ref never lands in the row) or let this blindly stomp a payment
+    // that a late `succeeded` webhook already moved to SUCCEEDED between our
+    // read above and this write.
+    const freshRef = `sess_${randomUUID()}`
+    const reset = await prisma.payment.updateMany({
+      where: { bookingId, status: 'FAILED' },
       data: {
-        providerRef: `sess_${randomUUID()}`,
+        providerRef: freshRef,
         // Re-read from the database in case anything about the booking
         // changed since the failed attempt — never from the request.
         amount: booking.totalPrice,
         status: 'PENDING',
       },
     })
-    return { providerRef: reset.providerRef, amount: reset.amount }
+    if (reset.count === 0) {
+      // Someone else moved this payment between our read and our write —
+      // act on what is actually there rather than overwriting it.
+      const current = await prisma.payment.findUnique({ where: { bookingId } })
+      if (!current || current.status === 'SUCCEEDED') throw new BookingNotPayableError()
+      return { providerRef: current.providerRef, amount: current.amount }
+    }
+    return { providerRef: freshRef, amount: booking.totalPrice }
   }
 
   try {

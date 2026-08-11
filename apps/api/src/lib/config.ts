@@ -47,3 +47,13 @@ export const LOGIN_RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000
 // LIMITATION comment on recordLoginFailure in lib/rate-limit.ts for what
 // happens if you deploy behind one with this left off.
 export const TRUST_PROXY = process.env.TRUST_PROXY === 'true'
+
+// How long a seat stays held for one user before it returns to the pool.
+// Long enough to finish a checkout form, short enough that an abandoned
+// cart doesn't hoard seats. Mirrored as the Redis key TTL.
+export const SEAT_HOLD_TTL_SECONDS = 300
+
+// Cap on seats per booking, so one request cannot sweep a whole zone.
+export const MAX_SEATS_PER_BOOKING = 8
+
+export const REDIS_URL = process.env.REDIS_URL ?? 'redis://localhost:6379'

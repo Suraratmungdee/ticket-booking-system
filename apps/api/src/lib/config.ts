@@ -57,3 +57,32 @@ export const SEAT_HOLD_TTL_SECONDS = 300
 export const MAX_SEATS_PER_BOOKING = 8
 
 export const REDIS_URL = process.env.REDIS_URL ?? 'redis://localhost:6379'
+
+// 'mock' runs a self-hosted fake provider so the payment flow can be
+// demonstrated without a real payment account. Swapping to a real provider
+// is meant to be a change at the provider layer only, not in booking logic.
+export const PAYMENT_PROVIDER = process.env.PAYMENT_PROVIDER ?? 'mock'
+
+// Shared secret the provider signs webhook bodies with. The dev fallback is
+// committed and therefore not a secret; production must set a real one.
+export const PAYMENT_WEBHOOK_SECRET =
+  process.env.PAYMENT_WEBHOOK_SECRET ?? 'dev-webhook-secret-change-me'
+
+// Where the mock provider posts its webhook back to. Only used by the mock.
+export const API_BASE_URL = process.env.API_BASE_URL ?? 'http://localhost:4000'
+
+// The mock provider can mark any booking PAID with no money involved. Shipped
+// to production it is a free-tickets endpoint for anyone who finds it, so a
+// production boot with the mock enabled must fail loudly rather than quietly
+// expose it. index.ts additionally refuses to mount the route at all unless
+// the provider is 'mock'.
+export function assertPaymentProviderIsSafe(): void {
+  if (process.env.NODE_ENV === 'production' && PAYMENT_PROVIDER === 'mock') {
+    throw new Error(
+      'Refusing to start: PAYMENT_PROVIDER=mock in production would let anyone mark a booking PAID without paying.',
+    )
+  }
+  if (process.env.NODE_ENV === 'production' && !process.env.PAYMENT_WEBHOOK_SECRET) {
+    throw new Error('PAYMENT_WEBHOOK_SECRET must be set when NODE_ENV=production')
+  }
+}

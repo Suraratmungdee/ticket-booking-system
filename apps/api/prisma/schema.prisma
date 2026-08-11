@@ -64,6 +64,13 @@ enum BookingStatus {
   PAID
   EXPIRED
   CANCELLED
+  REFUND_REQUIRED
+}
+
+enum PaymentStatus {
+  PENDING
+  SUCCEEDED
+  FAILED
 }
 
 model SeatMap {
@@ -98,6 +105,7 @@ model Booking {
   createdAt  DateTime      @default(now())
   expiresAt  DateTime
   seats      BookingSeat[]
+  payment    Payment?
 
   @@index([status, expiresAt])
 }
@@ -110,4 +118,26 @@ model BookingSeat {
   seat      Seat    @relation(fields: [seatId], references: [id])
 
   @@unique([bookingId, seatId])
+}
+
+model Payment {
+  id          String        @id @default(cuid())
+  bookingId   String        @unique
+  booking     Booking       @relation(fields: [bookingId], references: [id])
+  provider    String
+  providerRef String        @unique
+  amount      Int
+  status      PaymentStatus @default(PENDING)
+  paidAt      DateTime?
+  createdAt   DateTime      @default(now())
+}
+
+// Idempotency ledger. A provider may deliver the same event more than once
+// (retry after a timeout, at-least-once delivery). Inserting the id inside
+// the same transaction as the effect means a duplicate loses to the unique
+// constraint instead of applying the effect twice.
+model WebhookEvent {
+  id         String   @id @default(cuid())
+  eventId    String   @unique
+  receivedAt DateTime @default(now())
 }

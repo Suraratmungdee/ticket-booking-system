@@ -14,24 +14,60 @@ export async function createCheckoutSession(bookingId: string, userId: string) {
   if (booking.status !== 'PENDING_PAYMENT') throw new BookingNotPayableError()
   if (booking.expiresAt <= new Date()) throw new BookingNotPayableError()
 
-  // Clicking pay twice must not mint a second session — the seat hold and the
-  // amount are unchanged, so the existing one is still the right one.
+  // bookingId is @unique on Payment, so there is at most one row per booking
+  // — it must be reused, not re-inserted, on every path below.
   const existing = await prisma.payment.findUnique({ where: { bookingId } })
-  if (existing && existing.status === 'PENDING') {
-    return { providerRef: existing.providerRef, amount: existing.amount }
+  if (existing) {
+    // Clicking pay twice must not mint a second session — the seat hold and
+    // the amount are unchanged, so the existing one is still the right one.
+    if (existing.status === 'PENDING') {
+      return { providerRef: existing.providerRef, amount: existing.amount }
+    }
+    // Already paid for — never open a new session on top of a success. (The
+    // booking-status check above will usually have already caught this, but
+    // this does not rely on that alone.)
+    if (existing.status === 'SUCCEEDED') throw new BookingNotPayableError()
+
+    // FAILED: reset the same row for a retry rather than inserting a second
+    // one — bookingId's unique constraint would reject that anyway. A fresh
+    // providerRef matters: the old ref may already have a WebhookEvent
+    // recorded against it, and reusing it would let a stale delivery apply
+    // to this retry.
+    const reset = await prisma.payment.update({
+      where: { bookingId },
+      data: {
+        providerRef: `sess_${randomUUID()}`,
+        // Re-read from the database in case anything about the booking
+        // changed since the failed attempt — never from the request.
+        amount: booking.totalPrice,
+        status: 'PENDING',
+      },
+    })
+    return { providerRef: reset.providerRef, amount: reset.amount }
   }
 
-  const created = await prisma.payment.create({
-    data: {
-      bookingId,
-      provider: PAYMENT_PROVIDER,
-      providerRef: `sess_${randomUUID()}`,
-      // From the database, never from the request.
-      amount: booking.totalPrice,
-      status: 'PENDING',
-    },
-  })
-  return { providerRef: created.providerRef, amount: created.amount }
+  try {
+    const created = await prisma.payment.create({
+      data: {
+        bookingId,
+        provider: PAYMENT_PROVIDER,
+        providerRef: `sess_${randomUUID()}`,
+        // From the database, never from the request.
+        amount: booking.totalPrice,
+        status: 'PENDING',
+      },
+    })
+    return { providerRef: created.providerRef, amount: created.amount }
+  } catch (err) {
+    // Two simultaneous clicks both read `existing` as null and both land
+    // here; bookingId's unique constraint lets exactly one create() through.
+    // The loser gets the winner's session instead of a raw Prisma error.
+    if (typeof err === 'object' && err !== null && 'code' in err && err.code === 'P2002') {
+      const winner = await prisma.payment.findUnique({ where: { bookingId } })
+      if (winner) return { providerRef: winner.providerRef, amount: winner.amount }
+    }
+    throw err
+  }
 }
 
 type SeatRow = { id: string; status: string }
@@ -61,16 +97,35 @@ export async function applyPaymentOutcome(input: {
     if (!payment) throw new PaymentNotFoundError()
 
     if (input.outcome === 'failed') {
-      await tx.payment.update({ where: { id: payment.id }, data: { status: 'FAILED' } })
+      // A stale/out-of-order failure (different eventId, same providerRef)
+      // arriving after a success already applied must not downgrade a
+      // payment that has already succeeded — that would leave Payment.FAILED
+      // sitting next to Booking.PAID with nothing to reconcile them.
+      if (payment.status === 'PENDING') {
+        await tx.payment.update({ where: { id: payment.id }, data: { status: 'FAILED' } })
+      }
       // A failed charge never moves the booking in either direction — the
       // user can retry until the hold expires, and expiry is the sweep's job.
       return { applied: true, bookingStatus: payment.booking.status }
     }
 
-    await tx.payment.update({
-      where: { id: payment.id },
-      data: { status: 'SUCCEEDED', paidAt: new Date() },
-    })
+    // REFUND_REQUIRED is terminal: a refund may already be sitting in an
+    // admin's queue for this booking. A duplicate success delivered after
+    // that must not silently clear it and re-book seats that happen to be
+    // free again.
+    if (payment.booking.status === 'REFUND_REQUIRED') {
+      return { applied: true, bookingStatus: 'REFUND_REQUIRED' }
+    }
+
+    // Only stamp paidAt on the actual transition into SUCCEEDED — a
+    // duplicate success delivery (different eventId, same providerRef) must
+    // not drift the timestamp forward.
+    if (payment.status !== 'SUCCEEDED') {
+      await tx.payment.update({
+        where: { id: payment.id },
+        data: { status: 'SUCCEEDED', paidAt: new Date() },
+      })
+    }
 
     if (payment.booking.status === 'PAID') {
       return { applied: true, bookingStatus: 'PAID' }

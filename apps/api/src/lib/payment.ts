@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { prisma } from './prisma.js'
 import { PAYMENT_PROVIDER } from './config.js'
+import { issueTicket } from './ticket.js'
 
 export class BookingNotPayableError extends Error {}
 export class PaymentNotFoundError extends Error {}
@@ -92,7 +93,7 @@ export async function applyPaymentOutcome(input: {
   eventId: string
   providerRef: string
   outcome: 'succeeded' | 'failed'
-}): Promise<{ applied: boolean; bookingStatus?: string }> {
+}): Promise<{ applied: boolean; bookingStatus?: string; bookingId?: string }> {
   return await prisma.$transaction(async (tx) => {
     // Idempotency: the unique constraint is the arbiter, not a prior read.
     // A SELECT-then-INSERT would let two simultaneous deliveries both miss
@@ -158,7 +159,11 @@ export async function applyPaymentOutcome(input: {
     }
 
     if (payment.booking.status === 'PAID') {
-      return { applied: true, bookingStatus: 'PAID' }
+      // Re-delivery of an already-applied success: the ticket was issued
+      // when the booking first became PAID. Not here — re-issuing would
+      // just no-op against the unique constraint, but calling issueTicket
+      // is not needed at all on a path that changed nothing.
+      return { applied: true, bookingStatus: 'PAID', bookingId: payment.bookingId }
     }
 
     if (payment.booking.status === 'PENDING_PAYMENT') {
@@ -172,7 +177,12 @@ export async function applyPaymentOutcome(input: {
         where: { id: payment.bookingId, status: 'PENDING_PAYMENT' },
         data: { status: 'PAID' },
       })
-      if (won.count === 1) return { applied: true, bookingStatus: 'PAID' }
+      if (won.count === 1) {
+        // Same transaction as the status change: PAID without a ticket is a
+        // state no reader should ever be able to observe.
+        await issueTicket(tx, payment.bookingId)
+        return { applied: true, bookingStatus: 'PAID', bookingId: payment.bookingId }
+      }
       // Lost to the expiry sweep — fall through to the recover-or-
       // REFUND_REQUIRED branch below, which re-locks the seats and decides
       // honestly rather than trusting the stale read above.
@@ -196,7 +206,8 @@ export async function applyPaymentOutcome(input: {
     if (allFree) {
       await tx.seat.updateMany({ where: { id: { in: seatIds } }, data: { status: 'BOOKED' } })
       await tx.booking.update({ where: { id: payment.bookingId }, data: { status: 'PAID' } })
-      return { applied: true, bookingStatus: 'PAID' }
+      await issueTicket(tx, payment.bookingId)
+      return { applied: true, bookingStatus: 'PAID', bookingId: payment.bookingId }
     }
 
     // LIMITATION: this only records that a refund is owed. Nothing pays it

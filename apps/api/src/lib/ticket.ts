@@ -1,4 +1,5 @@
-import { createHmac, timingSafeEqual } from 'node:crypto'
+import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto'
+import type { Prisma } from '@prisma/client'
 import { TICKET_SIGNING_SECRET } from './config.js'
 
 // The QR carries "<ticketId>.<hmac>" so a scanner can tell a forged code
@@ -36,4 +37,29 @@ export function verifyTicketPayload(payload: string): string | null {
   if (provided.length !== expected.length) return null
 
   return timingSafeEqual(provided, expected) ? ticketId : null
+}
+
+// Issues the single ticket for a booking. Called inside the same
+// transaction that moves the booking to PAID, so "PAID" and "has a ticket"
+// can never disagree.
+//
+// The id is generated here rather than left to @default(cuid()): the
+// payload signs the id, so the id has to exist before the row is written.
+//
+// A duplicate webhook delivery loses to bookingId's unique constraint and
+// returns quietly. Reading first and inserting only if absent would be a
+// check-then-act race — two parallel deliveries would both see nothing.
+export async function issueTicket(
+  tx: Prisma.TransactionClient,
+  bookingId: string,
+): Promise<void> {
+  const id = randomUUID()
+  try {
+    await tx.ticket.create({
+      data: { id, bookingId, qrCodePayload: signTicketPayload(id) },
+    })
+  } catch (err) {
+    if (typeof err === 'object' && err !== null && 'code' in err && err.code === 'P2002') return
+    throw err
+  }
 }

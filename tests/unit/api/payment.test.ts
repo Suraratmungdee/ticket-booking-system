@@ -6,6 +6,7 @@ const m = vi.hoisted(() => ({
   paymentCreate: vi.fn(),
   paymentUpdateMany: vi.fn(),
   transaction: vi.fn(),
+  ticketCreate: vi.fn(),
 }))
 
 vi.mock('../../../apps/api/src/lib/prisma', () => ({
@@ -211,9 +212,13 @@ describe('createCheckoutSession', () => {
   })
 })
 
-// Runs the callback against a stub transaction client.
+// Runs the callback against a stub transaction client. `ticket` is seeded
+// by default because every PAID path issues one — a test that cares asserts
+// on m.ticketCreate; a test that does not gets a working stub for free.
 function txRuns(tx: Record<string, unknown>) {
-  m.transaction.mockImplementation(async (fn: (t: unknown) => unknown) => fn(tx))
+  m.transaction.mockImplementation(async (fn: (t: unknown) => unknown) =>
+    fn({ ticket: { create: m.ticketCreate }, ...tx }),
+  )
 }
 
 describe('applyPaymentOutcome', () => {
@@ -593,5 +598,170 @@ describe('applyPaymentOutcome', () => {
     expect(bookingUpdate).toHaveBeenCalledWith(
       expect.objectContaining({ data: expect.objectContaining({ status: 'REFUND_REQUIRED' }) }),
     )
+  })
+})
+
+describe('applyPaymentOutcome — ticket issuance', () => {
+  it('issues a ticket when a PENDING_PAYMENT booking becomes PAID', async () => {
+    txRuns({
+      webhookEvent: { create: vi.fn().mockResolvedValue({}) },
+      payment: {
+        findUnique: vi.fn().mockResolvedValue({
+          id: 'p1',
+          bookingId: 'b1',
+          status: 'PENDING',
+          booking: { id: 'b1', status: 'PENDING_PAYMENT' },
+        }),
+        update: vi.fn(),
+        updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+      },
+      booking: { update: vi.fn(), updateMany: vi.fn().mockResolvedValue({ count: 1 }) },
+    })
+
+    const result = await applyPaymentOutcome({
+      eventId: 'evt_t1',
+      providerRef: 'ref_1',
+      outcome: 'succeeded',
+    })
+
+    expect(result.bookingStatus).toBe('PAID')
+    expect(m.ticketCreate).toHaveBeenCalledTimes(1)
+    expect(m.ticketCreate.mock.calls[0][0].data.bookingId).toBe('b1')
+  })
+
+  // The recover path: the hold lapsed, the sweep won the CAS, but the seats
+  // are still free. This booking becomes PAID too, so it needs a ticket by
+  // the same rule — a second code path is exactly where one gets forgotten.
+  it('issues a ticket on the recover path when the seats are still free', async () => {
+    txRuns({
+      webhookEvent: { create: vi.fn().mockResolvedValue({}) },
+      payment: {
+        findUnique: vi.fn().mockResolvedValue({
+          id: 'p1',
+          bookingId: 'b1',
+          status: 'PENDING',
+          booking: {
+            id: 'b1',
+            status: 'PENDING_PAYMENT',
+            seats: [{ seatId: 's1' }, { seatId: 's2' }],
+          },
+        }),
+        update: vi.fn(),
+        updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+      },
+      $queryRaw: vi.fn().mockResolvedValue([
+        { id: 's1', status: 'AVAILABLE' },
+        { id: 's2', status: 'AVAILABLE' },
+      ]),
+      seat: { updateMany: vi.fn() },
+      booking: { update: vi.fn(), updateMany: vi.fn().mockResolvedValue({ count: 0 }) },
+    })
+
+    const result = await applyPaymentOutcome({
+      eventId: 'evt_t2',
+      providerRef: 'ref_1',
+      outcome: 'succeeded',
+    })
+
+    expect(result.bookingStatus).toBe('PAID')
+    expect(m.ticketCreate).toHaveBeenCalledTimes(1)
+    expect(m.ticketCreate.mock.calls[0][0].data.bookingId).toBe('b1')
+  })
+
+  it('issues no ticket when the outcome is failed', async () => {
+    txRuns({
+      webhookEvent: { create: vi.fn().mockResolvedValue({}) },
+      payment: {
+        findUnique: vi.fn().mockResolvedValue({
+          id: 'p1',
+          bookingId: 'b1',
+          status: 'PENDING',
+          booking: { id: 'b1', status: 'PENDING_PAYMENT' },
+        }),
+        update: vi.fn(),
+      },
+      booking: { update: vi.fn() },
+    })
+
+    await applyPaymentOutcome({ eventId: 'evt_t3', providerRef: 'ref_1', outcome: 'failed' })
+
+    expect(m.ticketCreate).not.toHaveBeenCalled()
+  })
+
+  // Money already owed back. A ticket here would hand out seats that
+  // someone else is holding.
+  it('issues no ticket for a booking already flagged REFUND_REQUIRED', async () => {
+    txRuns({
+      webhookEvent: { create: vi.fn().mockResolvedValue({}) },
+      payment: {
+        findUnique: vi.fn().mockResolvedValue({
+          id: 'p1',
+          bookingId: 'b1',
+          status: 'PENDING',
+          booking: { id: 'b1', status: 'REFUND_REQUIRED' },
+        }),
+        update: vi.fn(),
+        updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+      },
+      booking: { update: vi.fn(), updateMany: vi.fn() },
+    })
+
+    const result = await applyPaymentOutcome({
+      eventId: 'evt_t4',
+      providerRef: 'ref_1',
+      outcome: 'succeeded',
+    })
+
+    expect(result.bookingStatus).toBe('REFUND_REQUIRED')
+    expect(m.ticketCreate).not.toHaveBeenCalled()
+  })
+
+  it('issues no ticket when a seat was taken and a refund becomes owed', async () => {
+    txRuns({
+      webhookEvent: { create: vi.fn().mockResolvedValue({}) },
+      payment: {
+        findUnique: vi.fn().mockResolvedValue({
+          id: 'p1',
+          bookingId: 'b1',
+          status: 'PENDING',
+          booking: {
+            id: 'b1',
+            status: 'PENDING_PAYMENT',
+            seats: [{ seatId: 's1' }, { seatId: 's2' }],
+          },
+        }),
+        update: vi.fn(),
+        updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+      },
+      $queryRaw: vi.fn().mockResolvedValue([
+        { id: 's1', status: 'AVAILABLE' },
+        { id: 's2', status: 'BOOKED' },
+      ]),
+      seat: { updateMany: vi.fn() },
+      booking: { update: vi.fn(), updateMany: vi.fn().mockResolvedValue({ count: 0 }) },
+    })
+
+    const result = await applyPaymentOutcome({
+      eventId: 'evt_t5',
+      providerRef: 'ref_1',
+      outcome: 'succeeded',
+    })
+
+    expect(result.bookingStatus).toBe('REFUND_REQUIRED')
+    expect(m.ticketCreate).not.toHaveBeenCalled()
+  })
+
+  it('issues no ticket when the event is a duplicate delivery', async () => {
+    txRuns({
+      webhookEvent: {
+        create: vi.fn().mockRejectedValue(Object.assign(new Error('dup'), { code: 'P2002' })),
+      },
+      booking: { update: vi.fn() },
+    })
+
+    const result = await applyPaymentOutcome({ eventId: 'evt_t6', providerRef: 'ref_1', outcome: 'succeeded' })
+
+    expect(result.applied).toBe(false)
+    expect(m.ticketCreate).not.toHaveBeenCalled()
   })
 })

@@ -19,6 +19,8 @@ export default function BookingPage({ params }: { params: Promise<{ id: string }
   const router = useRouter()
   const [booking, setBooking] = useState<Booking | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [checkoutError, setCheckoutError] = useState<string | null>(null)
+  const [submitting, setSubmitting] = useState(false)
 
   useEffect(() => {
     let cancelled = false
@@ -48,6 +50,44 @@ export default function BookingPage({ params }: { params: Promise<{ id: string }
     }
   }, [id, router])
 
+  async function handleCheckout() {
+    if (submitting) return
+    setSubmitting(true)
+    setCheckoutError(null)
+
+    let res: Response
+    try {
+      res = await apiFetch(`/bookings/${id}/checkout`, { method: 'POST' })
+    } catch (err) {
+      console.error(err)
+      setCheckoutError('เชื่อมต่อเซิร์ฟเวอร์ไม่สำเร็จ กรุณาลองใหม่อีกครั้ง')
+      setSubmitting(false)
+      return
+    }
+
+    if (res.status === 401) {
+      router.push('/login')
+      return
+    }
+    if (!res.ok) {
+      // 409 covers "not yours", "not pending", and "hold expired" alike (see
+      // apps/api/src/routes/bookings.ts) — the caller can't tell which, so
+      // the message stays generic rather than guessing a reason.
+      if (res.status === 409) {
+        setCheckoutError('การจองนี้ไม่สามารถชำระเงินได้แล้ว')
+      } else {
+        setCheckoutError('เริ่มการชำระเงินไม่สำเร็จ กรุณาลองใหม่อีกครั้ง')
+      }
+      setSubmitting(false)
+      return
+    }
+
+    const data = await res.json()
+    // Full navigation, not router.push — checkoutUrl is the absolute URL a
+    // real payment provider would hand back, not a Next.js route.
+    window.location.href = data.checkoutUrl
+  }
+
   if (error) return <main className="mx-auto max-w-2xl p-8"><p className="text-red-600">{error}</p></main>
   if (!booking) return <main className="mx-auto max-w-2xl p-8"><p>กำลังโหลด…</p></main>
 
@@ -74,9 +114,33 @@ export default function BookingPage({ params }: { params: Promise<{ id: string }
         )}
       </div>
 
-      <p className="text-sm text-gray-500">
-        การชำระเงินจะเปิดให้ใช้งานใน Phase ถัดไป
-      </p>
+      {checkoutError && <p className="text-red-600">{checkoutError}</p>}
+
+      {booking.status === 'PENDING_PAYMENT' && (
+        <button
+          type="button"
+          onClick={handleCheckout}
+          disabled={submitting}
+          className="bg-black text-white p-2 rounded disabled:bg-gray-400"
+        >
+          {submitting ? 'กำลังไปหน้าชำระเงิน…' : 'ไปชำระเงิน'}
+        </button>
+      )}
+      {booking.status === 'PAID' && (
+        <p className="text-green-700">ชำระเงินสำเร็จแล้ว ขอบคุณที่ใช้บริการ</p>
+      )}
+      {booking.status === 'EXPIRED' && (
+        <p className="text-gray-600">การจองนี้หมดเวลาชำระเงินแล้ว กรุณาทำการจองใหม่</p>
+      )}
+      {booking.status === 'REFUND_REQUIRED' && (
+        <p className="text-amber-700">
+          การชำระเงินของคุณสำเร็จแล้ว แต่ที่นั่งที่จองไว้ถูกผู้อื่นจองไปก่อนในช่วงเวลาที่ทำรายการ
+          ท่านจะได้รับเงินคืนเต็มจำนวน เจ้าหน้าที่จะติดต่อกลับเพื่อดำเนินการคืนเงินโดยเร็วที่สุด
+        </p>
+      )}
+      {booking.status === 'CANCELLED' && (
+        <p className="text-gray-600">การจองนี้ถูกยกเลิกแล้ว</p>
+      )}
     </main>
   )
 }

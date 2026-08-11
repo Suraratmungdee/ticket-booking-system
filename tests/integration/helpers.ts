@@ -112,6 +112,10 @@ export async function createFixture(labelOrOptions: string | FixtureOptions = {}
 export async function deleteFixture(fixture: TestFixture): Promise<void> {
   await prisma.bookingSeat.deleteMany({ where: { seatId: fixture.seatId } })
   if (fixture.bookingId) {
+    // The success path now issues a Ticket in the same transaction as PAID
+    // (Ticket.bookingId -> Booking, no cascade) — delete it before the
+    // booking or booking.deleteMany below violates the FK.
+    await prisma.ticket.deleteMany({ where: { bookingId: fixture.bookingId } })
     await prisma.payment.deleteMany({ where: { bookingId: fixture.bookingId } })
   }
   await prisma.booking.deleteMany({ where: { userId: { in: fixture.userIds } } })

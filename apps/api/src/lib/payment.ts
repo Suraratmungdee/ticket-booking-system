@@ -123,7 +123,7 @@ export async function applyPaymentOutcome(input: {
       }
       // A failed charge never moves the booking in either direction — the
       // user can retry until the hold expires, and expiry is the sweep's job.
-      return { applied: true, bookingStatus: payment.booking.status }
+      return { applied: true, bookingStatus: payment.booking.status, bookingId: payment.bookingId }
     }
 
     // REFUND_REQUIRED is terminal: a refund may already be sitting in an
@@ -131,7 +131,7 @@ export async function applyPaymentOutcome(input: {
     // that must not silently clear it and re-book seats that happen to be
     // free again.
     if (payment.booking.status === 'REFUND_REQUIRED') {
-      return { applied: true, bookingStatus: 'REFUND_REQUIRED' }
+      return { applied: true, bookingStatus: 'REFUND_REQUIRED', bookingId: payment.bookingId }
     }
 
     // Only stamp paidAt on the actual transition into SUCCEEDED — a
@@ -160,9 +160,10 @@ export async function applyPaymentOutcome(input: {
 
     if (payment.booking.status === 'PAID') {
       // Re-delivery of an already-applied success: the ticket was issued
-      // when the booking first became PAID. Not here — re-issuing would
-      // just no-op against the unique constraint, but calling issueTicket
-      // is not needed at all on a path that changed nothing.
+      // when the booking first became PAID. Not here — issueTicket now lets
+      // a duplicate-key error propagate and abort the transaction (see the
+      // comment on issueTicket), so calling it again on a path that changed
+      // nothing would only roll back this otherwise-harmless no-op.
       return { applied: true, bookingStatus: 'PAID', bookingId: payment.bookingId }
     }
 
@@ -217,6 +218,6 @@ export async function applyPaymentOutcome(input: {
       where: { id: payment.bookingId },
       data: { status: 'REFUND_REQUIRED' },
     })
-    return { applied: true, bookingStatus: 'REFUND_REQUIRED' }
+    return { applied: true, bookingStatus: 'REFUND_REQUIRED', bookingId: payment.bookingId }
   })
 }

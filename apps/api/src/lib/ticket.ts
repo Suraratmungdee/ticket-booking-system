@@ -46,20 +46,31 @@ export function verifyTicketPayload(payload: string): string | null {
 // The id is generated here rather than left to @default(cuid()): the
 // payload signs the id, so the id has to exist before the row is written.
 //
-// A duplicate webhook delivery loses to bookingId's unique constraint and
-// returns quietly. Reading first and inserting only if absent would be a
-// check-then-act race — two parallel deliveries would both see nothing.
+// A duplicate webhook delivery collides with bookingId's unique constraint
+// and P2002 is deliberately left UNCAUGHT — do not add a try/catch back.
+// Postgres aborts the whole transaction the instant that constraint is
+// violated; Prisma does not give each statement its own savepoint. Catching
+// P2002 here and returning normally would not resume the transaction — the
+// booking/payment/webhookEvent writes made earlier in this same transaction
+// would all silently roll back at COMMIT while the caller believes it
+// succeeded, which is worse than doing nothing: the webhook would answer
+// 200, the provider would stop retrying, and the booking would be stuck at
+// PENDING_PAYMENT with the customer already charged and no REFUND_REQUIRED
+// flag to catch it. Letting it throw aborts the transaction honestly and
+// the webhook route returns 500, so the provider retries and the second
+// attempt (a fresh transaction, ticket already present) can decide again.
+//
+// This is NOT the same situation as the webhookEvent.create P2002 swallow
+// at the top of applyPaymentOutcome in payment.ts — that one is safe only
+// because it is the FIRST statement in the transaction, so there is nothing
+// preceding it that a rollback would discard. issueTicket runs after the
+// booking/payment writes, so the same pattern here would erase them.
 export async function issueTicket(
   tx: Prisma.TransactionClient,
   bookingId: string,
 ): Promise<void> {
   const id = randomUUID()
-  try {
-    await tx.ticket.create({
-      data: { id, bookingId, qrCodePayload: signTicketPayload(id) },
-    })
-  } catch (err) {
-    if (typeof err === 'object' && err !== null && 'code' in err && err.code === 'P2002') return
-    throw err
-  }
+  await tx.ticket.create({
+    data: { id, bookingId, qrCodePayload: signTicketPayload(id) },
+  })
 }

@@ -20,9 +20,14 @@ describe('issueTicket', () => {
     expect(verifyTicketPayload(data.qrCodePayload)).toBe(data.id)
   })
 
-  it('is a no-op when a ticket already exists (duplicate webhook delivery)', async () => {
+  // A caught-and-swallowed P2002 here would NOT resume the transaction —
+  // Postgres has already aborted it, so the earlier booking/payment writes
+  // in the same transaction would silently roll back at COMMIT while the
+  // caller believes it succeeded. The error must propagate so the
+  // transaction aborts honestly and the webhook route returns 500.
+  it('propagates a unique-constraint violation when a ticket already exists (duplicate webhook delivery)', async () => {
     const create = vi.fn().mockRejectedValue(Object.assign(new Error('dup'), { code: 'P2002' }))
-    await expect(issueTicket(fakeTx(create), 'b1')).resolves.toBeUndefined()
+    await expect(issueTicket(fakeTx(create), 'b1')).rejects.toThrow('dup')
   })
 
   it('propagates errors that are not a unique-constraint violation', async () => {

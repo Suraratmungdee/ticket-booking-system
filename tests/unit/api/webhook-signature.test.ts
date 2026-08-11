@@ -44,4 +44,12 @@ describe('verifyWebhookSignature', () => {
   it('signs a Buffer and a string identically', () => {
     expect(signWebhookPayload(Buffer.from(body))).toBe(signWebhookPayload(body))
   })
+
+  // Buffer.from(hex) stops decoding at the first invalid hex pair instead of
+  // rejecting the string outright, so a correct signature with garbage
+  // appended would otherwise decode to the same bytes as the real one.
+  it('rejects a correct signature with trailing garbage appended', () => {
+    const signature = signWebhookPayload(body)
+    expect(verifyWebhookSignature(body, signature + 'zz')).toBe(false)
+  })
 })

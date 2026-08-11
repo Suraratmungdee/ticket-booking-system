@@ -61,12 +61,23 @@ export const REDIS_URL = process.env.REDIS_URL ?? 'redis://localhost:6379'
 // 'mock' runs a self-hosted fake provider so the payment flow can be
 // demonstrated without a real payment account. Swapping to a real provider
 // is meant to be a change at the provider layer only, not in booking logic.
-export const PAYMENT_PROVIDER = process.env.PAYMENT_PROVIDER ?? 'mock'
+//
+// Default is 'stripe', not 'mock': the mock provider exposes an
+// unauthenticated free-tickets endpoint (see assertPaymentProviderIsSafe
+// below), and the boot guard that would catch it only runs when
+// NODE_ENV === 'production'. A deploy with NODE_ENV unset/'staging' and this
+// variable forgotten must fail closed (no mock routes mounted) rather than
+// fail open — convenient for local dev is not the same as safe by default,
+// so local dev sets PAYMENT_PROVIDER=mock explicitly in .env instead.
+export const PAYMENT_PROVIDER = process.env.PAYMENT_PROVIDER ?? 'stripe'
 
 // Shared secret the provider signs webhook bodies with. The dev fallback is
-// committed and therefore not a secret; production must set a real one.
+// committed and therefore not a secret; production must set a real one —
+// and must not set it to the .env.example placeholder, which is exactly
+// this same string (see the placeholder check below).
+const DEV_WEBHOOK_SECRET_FALLBACK = 'dev-webhook-secret-change-me'
 export const PAYMENT_WEBHOOK_SECRET =
-  process.env.PAYMENT_WEBHOOK_SECRET ?? 'dev-webhook-secret-change-me'
+  process.env.PAYMENT_WEBHOOK_SECRET ?? DEV_WEBHOOK_SECRET_FALLBACK
 
 // Where the mock provider posts its webhook back to. Only used by the mock.
 export const API_BASE_URL = process.env.API_BASE_URL ?? 'http://localhost:4000'
@@ -84,5 +95,18 @@ export function assertPaymentProviderIsSafe(): void {
   }
   if (process.env.NODE_ENV === 'production' && !process.env.PAYMENT_WEBHOOK_SECRET) {
     throw new Error('PAYMENT_WEBHOOK_SECRET must be set when NODE_ENV=production')
+  }
+  // .env.example commits the same string as the code fallback above. The
+  // check just above only verifies the variable is *set* — a deploy that
+  // copied .env.example verbatim would pass it while boot with a publicly
+  // known signing key, letting anyone forge a webhook that pays their own
+  // booking for free. Reject that specific value outright in production.
+  if (
+    process.env.NODE_ENV === 'production' &&
+    process.env.PAYMENT_WEBHOOK_SECRET === DEV_WEBHOOK_SECRET_FALLBACK
+  ) {
+    throw new Error(
+      'PAYMENT_WEBHOOK_SECRET is still the committed .env.example placeholder — set a real secret before deploying to production.',
+    )
   }
 }

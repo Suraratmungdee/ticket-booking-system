@@ -136,11 +136,25 @@ export async function applyPaymentOutcome(input: {
     // Only stamp paidAt on the actual transition into SUCCEEDED — a
     // duplicate success delivery (different eventId, same providerRef) must
     // not drift the timestamp forward.
+    //
+    // updateMany with providerRef in the where is the compare half of a
+    // compare-and-swap: a checkout retry's CAS (see createCheckoutSession)
+    // can reset this same row onto a fresh providerRef between our read
+    // above and this write. An unconditioned update would stamp SUCCEEDED
+    // onto the row now carrying the fresh ref — the retry's session would
+    // then look paid without anyone having paid it, and a real payment
+    // against the fresh ref would silently no-op as already-SUCCEEDED.
     if (payment.status !== 'SUCCEEDED') {
-      await tx.payment.update({
-        where: { id: payment.id },
+      const stamped = await tx.payment.updateMany({
+        where: { id: payment.id, providerRef: input.providerRef },
         data: { status: 'SUCCEEDED', paidAt: new Date() },
       })
+      if (stamped.count === 0) {
+        // Lost the race to a checkout retry that already reset this row
+        // onto a different providerRef — the session this event refers to
+        // no longer exists. Nothing to apply.
+        return { applied: false }
+      }
     }
 
     if (payment.booking.status === 'PAID') {
@@ -148,8 +162,20 @@ export async function applyPaymentOutcome(input: {
     }
 
     if (payment.booking.status === 'PENDING_PAYMENT') {
-      await tx.booking.update({ where: { id: payment.bookingId }, data: { status: 'PAID' } })
-      return { applied: true, bookingStatus: 'PAID' }
+      // updateMany with status in the where is the compare half of a
+      // compare-and-swap against expireStaleBookings(), which takes
+      // FOR UPDATE SKIP LOCKED on this same row and can commit EXPIRED
+      // between our read above and this write. An unconditioned update
+      // would stomp PAID straight over EXPIRED, leaving a charged booking
+      // with no seats, no refund flag, and seats free for resale.
+      const won = await tx.booking.updateMany({
+        where: { id: payment.bookingId, status: 'PENDING_PAYMENT' },
+        data: { status: 'PAID' },
+      })
+      if (won.count === 1) return { applied: true, bookingStatus: 'PAID' }
+      // Lost to the expiry sweep — fall through to the recover-or-
+      // REFUND_REQUIRED branch below, which re-locks the seats and decides
+      // honestly rather than trusting the stale read above.
     }
 
     // The money case: the hold lapsed before the webhook landed, the seats

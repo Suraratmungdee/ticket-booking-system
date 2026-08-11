@@ -289,25 +289,154 @@ describe('applyPaymentOutcome', () => {
   })
 
   it('marks a PENDING_PAYMENT booking PAID on success', async () => {
-    const bookingUpdate = vi.fn()
+    const bookingUpdateMany = vi.fn().mockResolvedValue({ count: 1 })
     txRuns({
       webhookEvent: { create: vi.fn().mockResolvedValue({}) },
       payment: {
         findUnique: vi.fn().mockResolvedValue({
           id: 'p1',
           bookingId: 'b1',
+          status: 'PENDING',
           booking: { id: 'b1', status: 'PENDING_PAYMENT' },
         }),
         update: vi.fn(),
+        updateMany: vi.fn().mockResolvedValue({ count: 1 }),
       },
-      booking: { update: bookingUpdate },
+      booking: { update: vi.fn(), updateMany: bookingUpdateMany },
     })
 
-    await applyPaymentOutcome({ eventId: 'evt_3', providerRef: 'ref_1', outcome: 'succeeded' })
+    const result = await applyPaymentOutcome({ eventId: 'evt_3', providerRef: 'ref_1', outcome: 'succeeded' })
 
+    expect(bookingUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: 'b1', status: 'PENDING_PAYMENT' },
+        data: { status: 'PAID' },
+      }),
+    )
+    expect(result.bookingStatus).toBe('PAID')
+  })
+
+  // The compare-and-swap that closes CRITICAL 1: expireStaleBookings() can
+  // commit EXPIRED on this same booking between the stale read at the top of
+  // the transaction and this write. Losing the CAS (count: 0) must not be
+  // silently treated as success — it must fall through to the seat re-check
+  // below rather than returning early, and the fall-through's outcome must
+  // honestly reflect whether the seats are still free. This fails if the
+  // updateMany is ever reverted back to an unconditioned update().
+  it('falls through to the seat re-check when the expiry sweep wins the race, and recovers when seats are free', async () => {
+    const bookingUpdate = vi.fn()
+    const bookingUpdateMany = vi.fn().mockResolvedValue({ count: 0 })
+    const seatUpdateMany = vi.fn()
+    const queryRaw = vi.fn().mockResolvedValue([
+      { id: 's1', status: 'AVAILABLE' },
+      { id: 's2', status: 'AVAILABLE' },
+    ])
+    txRuns({
+      webhookEvent: { create: vi.fn().mockResolvedValue({}) },
+      payment: {
+        findUnique: vi.fn().mockResolvedValue({
+          id: 'p1',
+          bookingId: 'b1',
+          status: 'PENDING',
+          // Stale read: the webhook's transaction saw this before the
+          // sweep's FOR UPDATE SKIP LOCKED committed EXPIRED underneath it.
+          booking: { id: 'b1', status: 'PENDING_PAYMENT', seats: [{ seatId: 's1' }, { seatId: 's2' }] },
+        }),
+        update: vi.fn(),
+        updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+      },
+      $queryRaw: queryRaw,
+      seat: { updateMany: seatUpdateMany },
+      booking: { update: bookingUpdate, updateMany: bookingUpdateMany },
+    })
+
+    const result = await applyPaymentOutcome({ eventId: 'evt_race_1', providerRef: 'ref_1', outcome: 'succeeded' })
+
+    expect(bookingUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { id: 'b1', status: 'PENDING_PAYMENT' }, data: { status: 'PAID' } }),
+    )
+    expect(queryRaw).toHaveBeenCalled()
+    expect(seatUpdateMany).toHaveBeenCalled()
     expect(bookingUpdate).toHaveBeenCalledWith(
       expect.objectContaining({ data: expect.objectContaining({ status: 'PAID' }) }),
     )
+    expect(result.bookingStatus).toBe('PAID')
+  })
+
+  it('falls through to the seat re-check when the expiry sweep wins the race, and flags REFUND_REQUIRED when a seat is gone', async () => {
+    const bookingUpdate = vi.fn()
+    const bookingUpdateMany = vi.fn().mockResolvedValue({ count: 0 })
+    const seatUpdateMany = vi.fn()
+    const queryRaw = vi.fn().mockResolvedValue([
+      { id: 's1', status: 'AVAILABLE' },
+      { id: 's2', status: 'BOOKED' },
+    ])
+    txRuns({
+      webhookEvent: { create: vi.fn().mockResolvedValue({}) },
+      payment: {
+        findUnique: vi.fn().mockResolvedValue({
+          id: 'p1',
+          bookingId: 'b1',
+          status: 'PENDING',
+          booking: { id: 'b1', status: 'PENDING_PAYMENT', seats: [{ seatId: 's1' }, { seatId: 's2' }] },
+        }),
+        update: vi.fn(),
+        updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+      },
+      $queryRaw: queryRaw,
+      seat: { updateMany: seatUpdateMany },
+      booking: { update: bookingUpdate, updateMany: bookingUpdateMany },
+    })
+
+    const result = await applyPaymentOutcome({ eventId: 'evt_race_2', providerRef: 'ref_1', outcome: 'succeeded' })
+
+    expect(bookingUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { id: 'b1', status: 'PENDING_PAYMENT' } }),
+    )
+    expect(queryRaw).toHaveBeenCalled()
+    expect(seatUpdateMany).not.toHaveBeenCalled()
+    expect(bookingUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ status: 'REFUND_REQUIRED' }) }),
+    )
+    expect(result.bookingStatus).toBe('REFUND_REQUIRED')
+  })
+
+  // The compare-and-swap that closes IMPORTANT 2: a checkout retry's own CAS
+  // (in createCheckoutSession) can reset this same payment row onto a fresh
+  // providerRef between this webhook's read and this write. Losing that race
+  // must be a no-op, not a stamp onto the row now carrying a different ref.
+  it('treats a lost providerRef compare-and-swap as a no-op, since a checkout retry already reset the row', async () => {
+    const bookingUpdate = vi.fn()
+    const paymentUpdateMany = vi.fn().mockResolvedValue({ count: 0 })
+    txRuns({
+      webhookEvent: { create: vi.fn().mockResolvedValue({}) },
+      payment: {
+        findUnique: vi.fn().mockResolvedValue({
+          id: 'p1',
+          bookingId: 'b1',
+          status: 'PENDING',
+          booking: { id: 'b1', status: 'PENDING_PAYMENT', seats: [] },
+        }),
+        update: vi.fn(),
+        updateMany: paymentUpdateMany,
+      },
+      booking: { update: bookingUpdate, updateMany: vi.fn() },
+    })
+
+    const result = await applyPaymentOutcome({
+      eventId: 'evt_stale_ref',
+      providerRef: 'ref_old',
+      outcome: 'succeeded',
+    })
+
+    expect(paymentUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: 'p1', providerRef: 'ref_old' },
+        data: expect.objectContaining({ status: 'SUCCEEDED' }),
+      }),
+    )
+    expect(result).toEqual({ applied: false })
+    expect(bookingUpdate).not.toHaveBeenCalled()
   })
 
   it('recovers an expired booking when every seat is still free', async () => {
@@ -326,6 +455,7 @@ describe('applyPaymentOutcome', () => {
           },
         }),
         update: vi.fn(),
+        updateMany: vi.fn().mockResolvedValue({ count: 1 }),
       },
       $queryRaw: vi.fn().mockResolvedValue([
         { id: 's1', status: 'AVAILABLE' },
@@ -362,6 +492,7 @@ describe('applyPaymentOutcome', () => {
           },
         }),
         update: vi.fn(),
+        updateMany: vi.fn().mockResolvedValue({ count: 1 }),
       },
       $queryRaw: vi.fn().mockResolvedValue([
         { id: 's1', status: 'AVAILABLE' },
@@ -390,6 +521,7 @@ describe('applyPaymentOutcome', () => {
           booking: { id: 'b1', status: 'PAID' },
         }),
         update: vi.fn(),
+        updateMany: vi.fn().mockResolvedValue({ count: 1 }),
       },
       booking: { update: bookingUpdate },
     })
@@ -448,6 +580,7 @@ describe('applyPaymentOutcome', () => {
           },
         }),
         update: vi.fn(),
+        updateMany: vi.fn().mockResolvedValue({ count: 1 }),
       },
       $queryRaw: vi.fn().mockResolvedValue([{ id: 's1', status: 'AVAILABLE' }]),
       seat: { updateMany: seatUpdateMany },

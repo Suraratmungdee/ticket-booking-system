@@ -1,4 +1,5 @@
 import { notFound } from 'next/navigation'
+import Link from 'next/link'
 import { API_URL } from '../../../lib/api'
 
 type EventDetail = {
@@ -60,8 +61,10 @@ export default async function EventDetailPage({
       <ul className="flex flex-col gap-2">
         {event.showtimes.map((showtime) => (
           <li key={showtime.id} className="border rounded p-3">
-            {new Date(showtime.startTime).toLocaleString('th-TH')} —{' '}
-            {new Date(showtime.endTime).toLocaleString('th-TH')} ({showtime.status})
+            <Link href={`/showtimes/${showtime.id}/seats`} className="underline">
+              {new Date(showtime.startTime).toLocaleString('th-TH')} —{' '}
+              {new Date(showtime.endTime).toLocaleString('th-TH')} ({showtime.status})
+            </Link>
           </li>
         ))}
         {event.showtimes.length === 0 && <p className="text-gray-500">ยังไม่มีรอบ</p>}

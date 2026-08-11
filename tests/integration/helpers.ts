@@ -11,9 +11,25 @@ export type TestFixture = {
   seatMapId: string
   seatId: string
   userIds: string[]
+  // Only populated when the matching FixtureOptions flag is set — the seat
+  // tests never request a booking/payment, so these stay '' for them and
+  // deleteFixture skips the extra cleanup.
+  bookingId: string
+  providerRef: string
 }
 
-export async function createFixture(label: string): Promise<TestFixture> {
+export type FixtureOptions = {
+  withBooking?: boolean
+  // Requires withBooking; a payment needs a booking to attach to.
+  withPendingPayment?: boolean
+}
+
+// Accepts either the original bare label (existing seat tests) or an
+// options object (payment-idempotency test) — kept as one function so
+// callers don't need to learn two names, new behavior defaults to off.
+export async function createFixture(labelOrOptions: string | FixtureOptions = {}): Promise<TestFixture> {
+  const label = typeof labelOrOptions === 'string' ? labelOrOptions : 'fixture'
+  const options = typeof labelOrOptions === 'string' ? {} : labelOrOptions
   const venue = await prisma.venue.create({
     data: { name: `${label} venue`, address: 'n/a' },
   })
@@ -50,13 +66,54 @@ export async function createFixture(label: string): Promise<TestFixture> {
     userIds.push(user.id)
   }
 
-  return { venueId: venue.id, eventId: event.id, showtimeId: showtime.id, seatMapId: seatMap.id, seatId: seat.id, userIds }
+  let bookingId = ''
+  let providerRef = ''
+  if (options.withBooking) {
+    const booking = await prisma.booking.create({
+      data: {
+        userId: userIds[0],
+        showtimeId: showtime.id,
+        status: 'PENDING_PAYMENT',
+        totalPrice: seatMap.price,
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000),
+        seats: { create: [{ seatId: seat.id }] },
+      },
+    })
+    bookingId = booking.id
+
+    if (options.withPendingPayment) {
+      const payment = await prisma.payment.create({
+        data: {
+          bookingId: booking.id,
+          provider: 'mock',
+          providerRef: `pr_test_${label}_${booking.id}`,
+          amount: booking.totalPrice,
+          status: 'PENDING',
+        },
+      })
+      providerRef = payment.providerRef
+    }
+  }
+
+  return {
+    venueId: venue.id,
+    eventId: event.id,
+    showtimeId: showtime.id,
+    seatMapId: seatMap.id,
+    seatId: seat.id,
+    userIds,
+    bookingId,
+    providerRef,
+  }
 }
 
 // Deletes only what createFixture created, children first to satisfy FK
 // constraints. Never touches seeded venues/events/showtimes/seats.
 export async function deleteFixture(fixture: TestFixture): Promise<void> {
   await prisma.bookingSeat.deleteMany({ where: { seatId: fixture.seatId } })
+  if (fixture.bookingId) {
+    await prisma.payment.deleteMany({ where: { bookingId: fixture.bookingId } })
+  }
   await prisma.booking.deleteMany({ where: { userId: { in: fixture.userIds } } })
   await prisma.seat.deleteMany({ where: { id: fixture.seatId } })
   await prisma.seatMap.deleteMany({ where: { id: fixture.seatMapId } })

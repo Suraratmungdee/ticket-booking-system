@@ -5,7 +5,10 @@ import authRouter from './routes/auth.js'
 import eventsRouter from './routes/events.js'
 import showtimesRouter from './routes/showtimes.js'
 import bookingsRouter from './routes/bookings.js'
-import { FRONTEND_ORIGIN, TRUST_PROXY } from './lib/config.js'
+import webhooksRouter from './routes/webhooks.js'
+import { FRONTEND_ORIGIN, TRUST_PROXY, PAYMENT_PROVIDER, assertPaymentProviderIsSafe } from './lib/config.js'
+
+assertPaymentProviderIsSafe()
 
 const app = express()
 
@@ -16,6 +19,10 @@ if (TRUST_PROXY) {
 }
 
 app.use(cors({ origin: FRONTEND_ORIGIN, credentials: true }))
+// Must be mounted before express.json(): the JSON parser reads the request
+// stream to completion and discards the original bytes, and the webhook
+// signature has to be verified against the exact bytes the provider signed.
+app.use('/webhooks', express.raw({ type: 'application/json' }))
 app.use(express.json())
 app.use(cookieParser())
 
@@ -27,6 +34,14 @@ app.use('/auth', authRouter)
 app.use('/events', eventsRouter)
 app.use('/showtimes', showtimesRouter)
 app.use('/bookings', bookingsRouter)
+app.use('/webhooks', webhooksRouter)
+
+// Mounted only for the mock provider. Not mounted-then-guarded: a route that
+// does not exist cannot be reached by a misconfiguration.
+if (PAYMENT_PROVIDER === 'mock') {
+  const { default: mockProviderRouter } = await import('./routes/mock-provider.js')
+  app.use('/mock-provider', mockProviderRouter)
+}
 
 const PORT = process.env.PORT ?? 4000
 app.listen(PORT, () => {

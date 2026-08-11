@@ -7,8 +7,6 @@ import { apiFetch } from '@/lib/api'
 type Seat = { id: string; row: string; number: number; status: 'AVAILABLE' | 'HELD' | 'BOOKED' }
 type Zone = { zoneName: string; price: number; seats: Seat[] }
 
-const MAX_SEATS = 8
-
 // Status is never conveyed by colour alone — each state also carries a symbol
 // and a text label, so it stays readable for colour-blind users.
 const SEAT_STYLE: Record<Seat['status'], { className: string; symbol: string; label: string }> = {
@@ -17,7 +15,18 @@ const SEAT_STYLE: Record<Seat['status'], { className: string; symbol: string; la
   BOOKED: { className: 'bg-gray-300 border-gray-400 text-gray-500 cursor-not-allowed', symbol: '✕', label: 'ถูกจองแล้ว' },
 }
 
-export function SeatPicker({ showtimeId, zones }: { showtimeId: string; zones: Zone[] }) {
+// MAX_SEATS comes from the server (config.ts's MAX_SEATS_PER_BOOKING via the
+// seat-map response) rather than being restated here — one source of truth
+// for the business rule, per CLAUDE.md §4.3.
+export function SeatPicker({
+  showtimeId,
+  zones,
+  maxSeats,
+}: {
+  showtimeId: string
+  zones: Zone[]
+  maxSeats: number
+}) {
   const router = useRouter()
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [error, setError] = useState<string | null>(null)
@@ -34,7 +43,7 @@ export function SeatPicker({ showtimeId, zones }: { showtimeId: string; zones: Z
     setSelected((prev) => {
       const next = new Set(prev)
       if (next.has(seat.id)) next.delete(seat.id)
-      else if (next.size >= MAX_SEATS) return prev
+      else if (next.size >= maxSeats) return prev
       else next.add(seat.id)
       return next
     })
@@ -63,12 +72,16 @@ export function SeatPicker({ showtimeId, zones }: { showtimeId: string; zones: Z
       return
     }
     if (!res.ok) {
-      const data = await res.json().catch(() => ({}))
-      setError(
-        typeof data.error === 'string'
-          ? 'ที่นั่งบางที่ถูกจองไปแล้ว กรุณาเลือกใหม่'
-          : 'จองไม่สำเร็จ กรุณาลองใหม่อีกครั้ง',
-      )
+      // Keyed off the status, not the shape of the error body — a 500 also
+      // returns { error: string }, and it is not "seats taken".
+      if (res.status === 409) {
+        setError('ที่นั่งบางที่ถูกจองไปแล้ว กรุณาเลือกใหม่')
+        // The seats that were just taken may be among `selected` — clear it
+        // so they stop counting toward the displayed total after refresh.
+        setSelected(new Set())
+      } else {
+        setError('จองไม่สำเร็จ กรุณาลองใหม่อีกครั้ง')
+      }
       setSubmitting(false)
       router.refresh()
       return

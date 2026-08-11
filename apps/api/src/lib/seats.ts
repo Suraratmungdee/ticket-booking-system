@@ -1,6 +1,7 @@
 import { prisma } from './prisma.js'
 import { getHeldSeatIds } from './seat-lock.js'
 import { expireStaleBookings } from './booking.js'
+import { MAX_SEATS_PER_BOOKING } from './config.js'
 
 export async function getSeatMap(showtimeId: string) {
   // Sweep first: a seat freed by an expired booking must not still read as
@@ -24,6 +25,9 @@ export async function getSeatMap(showtimeId: string) {
   const heldIds = await getHeldSeatIds(allSeatIds)
 
   return {
+    // Sent so the frontend never restates this cap itself (CLAUDE.md §4.3 —
+    // one source of truth for a business rule, not a copy in the UI).
+    maxSeatsPerBooking: MAX_SEATS_PER_BOOKING,
     zones: zones.map((zone) => ({
       zoneName: zone.zoneName,
       price: zone.price,

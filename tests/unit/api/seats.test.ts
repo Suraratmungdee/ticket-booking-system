@@ -45,6 +45,17 @@ describe('getSeatMap', () => {
     ])
   })
 
+  // Finding 4: the frontend must not restate MAX_SEATS_PER_BOOKING itself
+  // (CLAUDE.md §4.3 — one source of truth). The API is the source, so the
+  // response has to carry it.
+  it('includes maxSeatsPerBooking so the frontend never restates the cap', async () => {
+    mockFindMany.mockResolvedValue([])
+
+    const result = await getSeatMap('st1')
+
+    expect(result.maxSeatsPerBooking).toBe(8)
+  })
+
   it('leaves a BOOKED seat BOOKED even if a stale hold exists', async () => {
     mockFindMany.mockResolvedValue([
       { zoneName: 'VIP', price: 3500, seats: [{ id: 's1', row: 'A', number: 1, status: 'BOOKED' }] },

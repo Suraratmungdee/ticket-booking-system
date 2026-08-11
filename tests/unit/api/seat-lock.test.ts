@@ -4,9 +4,11 @@ const mockSet = vi.fn()
 const mockDel = vi.fn()
 const mockMGet = vi.fn()
 
-vi.mock('../../../apps/api/src/lib/redis', () => ({
-  getRedis: async () => ({ set: mockSet, del: mockDel, mGet: mockMGet }),
-}))
+// getRedis itself is a vi.fn() (not a fixed factory return) so individual
+// tests can make it reject, to simulate Redis being completely unreachable
+// rather than just a command failing.
+const { mockGetRedis } = vi.hoisted(() => ({ mockGetRedis: vi.fn() }))
+vi.mock('../../../apps/api/src/lib/redis', () => ({ getRedis: mockGetRedis }))
 
 import {
   acquireSeatHolds,
@@ -18,6 +20,8 @@ beforeEach(() => {
   mockSet.mockReset()
   mockDel.mockReset()
   mockMGet.mockReset()
+  mockGetRedis.mockReset()
+  mockGetRedis.mockResolvedValue({ set: mockSet, del: mockDel, mGet: mockMGet })
 })
 
 describe('acquireSeatHolds', () => {
@@ -87,5 +91,32 @@ describe('releaseSeatHolds', () => {
   it('does nothing for an empty list', async () => {
     await releaseSeatHolds([])
     expect(mockDel).not.toHaveBeenCalled()
+  })
+})
+
+// Finding 1: Redis is only a fast-fail gate, not the correctness guarantee
+// (Postgres's SELECT ... FOR UPDATE is). When Redis itself is unreachable,
+// every function here must fail *open* rather than propagate — otherwise a
+// Redis outage would 500 both booking and seat-map browsing, which is
+// exactly the failure mode the design document says must not happen.
+describe('fail-open when Redis is unavailable', () => {
+  beforeEach(() => {
+    mockGetRedis.mockReset()
+    mockGetRedis.mockRejectedValue(new Error('ECONNREFUSED'))
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+  })
+
+  it('acquireSeatHolds still returns true (lets Postgres decide)', async () => {
+    const ok = await acquireSeatHolds(['s1', 's2'], 'user-1')
+    expect(ok).toBe(true)
+  })
+
+  it('getHeldSeatIds returns an empty set (no HELD overlay, not a crash)', async () => {
+    const held = await getHeldSeatIds(['s1', 's2'])
+    expect(held).toEqual(new Set())
+  })
+
+  it('releaseSeatHolds does not throw', async () => {
+    await expect(releaseSeatHolds(['s1'])).resolves.toBeUndefined()
   })
 })

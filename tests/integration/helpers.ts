@@ -23,8 +23,12 @@ export async function createFixture(label: string): Promise<TestFixture> {
   const showtime = await prisma.showtime.create({
     data: {
       eventId: event.id,
-      startTime: new Date(),
-      endTime: new Date(Date.now() + 60 * 60 * 1000),
+      // Must be in the future: createBooking now rejects a showtime whose
+      // startTime has already passed (finding 3). `new Date()` here would
+      // be in the past by the time the booking calls run, and every
+      // concurrent request in these tests would 409 for the wrong reason.
+      startTime: new Date(Date.now() + 60 * 60 * 1000),
+      endTime: new Date(Date.now() + 2 * 60 * 60 * 1000),
     },
   })
   const seatMap = await prisma.seatMap.create({

@@ -41,10 +41,42 @@ import {
   TooManySeatsError,
 } from '../../../apps/api/src/lib/booking'
 
+// A showtime state that passes the SCHEDULED-and-not-started check, so
+// fixtures that only care about seat status don't also have to think about
+// showtime timing.
+const SCHEDULED = { showtimeStatus: 'SCHEDULED', showtimeStartTime: new Date(Date.now() + 3_600_000) }
+
 // Runs the callback against a tx stub exposing the same shape the real
 // transaction client does.
 function txRuns(tx: Record<string, unknown>) {
   mockTransaction.mockImplementation(async (fn: (t: unknown) => unknown) => fn(tx))
+}
+
+// Same idea, but for createBooking specifically: createBooking now calls
+// expireStaleBookings() (finding 2) before it opens its own seat-locking
+// transaction, and expireStaleBookings *also* goes through
+// prisma.$transaction — using the very same tx stub, since mockTransaction
+// always hands back the one object passed in. Its first `$queryRaw` call is
+// therefore the sweep, not the seat-lock query. This wrapper intercepts
+// that first call and answers "no stale bookings" (`[]`), which makes
+// expireStaleBookings short-circuit before it ever touches
+// tx.bookingSeat/booking/seat — so createBooking tests only need to stub
+// those for the seat-locking transaction, same as before this fix.
+// (expireStaleBookings' own tests use plain `txRuns` above — they call
+// expireStaleBookings() directly, with no preceding sweep to account for.)
+function txRunsForCreateBooking(tx: Record<string, unknown>) {
+  const mainQueryRaw = tx.$queryRaw as ((...args: unknown[]) => unknown) | undefined
+  let sweepAnswered = false
+  const composedQueryRaw = vi.fn(async (...args: unknown[]) => {
+    if (!sweepAnswered) {
+      sweepAnswered = true
+      return []
+    }
+    return mainQueryRaw ? mainQueryRaw(...args) : []
+  })
+  mockTransaction.mockImplementation(async (fn: (t: unknown) => unknown) =>
+    fn({ ...tx, $queryRaw: composedQueryRaw }),
+  )
 }
 
 beforeEach(() => {
@@ -78,12 +110,16 @@ describe('createBooking', () => {
       createBooking({ userId: 'u1', showtimeId: 'st1', seatIds: ['s1'] }),
     ).rejects.toThrow(SeatUnavailableError)
 
-    expect(mockTransaction).not.toHaveBeenCalled()
+    // $transaction is called once — by expireStaleBookings' sweep, which
+    // always runs first (finding 2). The seat-locking transaction (the one
+    // that would create a booking) must never open once Redis says no.
+    expect(mockTransaction).toHaveBeenCalledTimes(1)
+    expect(mockBookingCreate).not.toHaveBeenCalled()
   })
 
   // Redis said yes but Postgres is the authority and disagrees.
   it('releases the Redis holds when the DB finds a seat already booked', async () => {
-    txRuns({
+    txRunsForCreateBooking({
       $queryRaw: vi.fn().mockResolvedValue([
         { id: 's1', status: 'BOOKED', price: 2000, showtimeId: 'st1' },
       ]),
@@ -100,7 +136,7 @@ describe('createBooking', () => {
   // this fully green while stranding seats in Redis for the full TTL after
   // a connection drop or any other DB failure.
   it('releases the Redis holds when the DB fails for any other reason', async () => {
-    txRuns({ $queryRaw: vi.fn().mockRejectedValue(new Error('connection lost')) })
+    txRunsForCreateBooking({ $queryRaw: vi.fn().mockRejectedValue(new Error('connection lost')) })
 
     await expect(createBooking({ userId: 'u1', showtimeId: 'st1', seatIds: ['s1'] })).rejects.toThrow(
       'connection lost',
@@ -111,10 +147,10 @@ describe('createBooking', () => {
 
   it('computes totalPrice from the DB rows, not from anything the caller supplied', async () => {
     const create = vi.fn().mockResolvedValue({ id: 'b1' })
-    txRuns({
+    txRunsForCreateBooking({
       $queryRaw: vi.fn().mockResolvedValue([
-        { id: 's1', status: 'AVAILABLE', price: 3500, showtimeId: 'st1' },
-        { id: 's2', status: 'AVAILABLE', price: 1200, showtimeId: 'st1' },
+        { id: 's1', status: 'AVAILABLE', price: 3500, showtimeId: 'st1', ...SCHEDULED },
+        { id: 's2', status: 'AVAILABLE', price: 1200, showtimeId: 'st1', ...SCHEDULED },
       ]),
       seat: { updateMany: vi.fn() },
       booking: { create },
@@ -130,7 +166,7 @@ describe('createBooking', () => {
   })
 
   it('rejects seats that belong to a different showtime', async () => {
-    txRuns({
+    txRunsForCreateBooking({
       $queryRaw: vi.fn().mockResolvedValue([
         { id: 's1', status: 'AVAILABLE', price: 2000, showtimeId: 'OTHER' },
       ]),
@@ -140,6 +176,69 @@ describe('createBooking', () => {
       createBooking({ userId: 'u1', showtimeId: 'st1', seatIds: ['s1'] }),
     ).rejects.toThrow(SeatUnavailableError)
     expect(mockRelease).toHaveBeenCalled()
+  })
+
+  // Finding 2: the spec requires the stale-booking sweep at the start of
+  // BOTH getSeatMap and the hold path. Without it, a seat freed by a booking
+  // that just expired still reads BOOKED inside this function's own lock —
+  // a stale tab gets a 409 for a genuinely free seat.
+  it('sweeps stale bookings before opening the seat-locking transaction', async () => {
+    const order: string[] = []
+    const queryRaw = vi.fn(async () => {
+      // The very first call into the tx object is the sweep from
+      // expireStaleBookings; txRuns' wrapper answers it with `[]` before
+      // this fn ever runs for it, so every call that reaches here is the
+      // seat-locking query — recording it proves the sweep already ran.
+      order.push('seat-lock-query')
+      return [{ id: 's1', status: 'AVAILABLE', price: 1000, showtimeId: 'st1', ...SCHEDULED }]
+    })
+    // Wrap $transaction ourselves (bypassing txRuns) so we can also observe
+    // expireStaleBookings' own $transaction call, which txRuns' sweep
+    // shortcut would otherwise hide.
+    let transactionCalls = 0
+    mockTransaction.mockImplementation(async (fn: (t: unknown) => unknown) => {
+      transactionCalls += 1
+      if (transactionCalls === 1) {
+        order.push('sweep-transaction')
+        // Mirrors expireStaleBookings' real shape: no stale rows.
+        return fn({ $queryRaw: vi.fn().mockResolvedValue([]) })
+      }
+      return fn({
+        $queryRaw: queryRaw,
+        seat: { updateMany: vi.fn() },
+        booking: { create: vi.fn().mockResolvedValue({ id: 'b1' }) },
+      })
+    })
+
+    await createBooking({ userId: 'u1', showtimeId: 'st1', seatIds: ['s1'] })
+
+    expect(order).toEqual(['sweep-transaction', 'seat-lock-query'])
+  })
+
+  it('rejects booking a seat on a CANCELLED showtime', async () => {
+    txRunsForCreateBooking({
+      $queryRaw: vi.fn().mockResolvedValue([
+        { id: 's1', status: 'AVAILABLE', price: 2000, showtimeId: 'st1', showtimeStatus: 'CANCELLED', showtimeStartTime: new Date(Date.now() + 3_600_000) },
+      ]),
+    })
+
+    await expect(
+      createBooking({ userId: 'u1', showtimeId: 'st1', seatIds: ['s1'] }),
+    ).rejects.toThrow(SeatUnavailableError)
+    expect(mockRelease).toHaveBeenCalledWith(['s1'])
+  })
+
+  it('rejects booking a seat on a showtime that has already started', async () => {
+    txRunsForCreateBooking({
+      $queryRaw: vi.fn().mockResolvedValue([
+        { id: 's1', status: 'AVAILABLE', price: 2000, showtimeId: 'st1', showtimeStatus: 'SCHEDULED', showtimeStartTime: new Date(Date.now() - 60_000) },
+      ]),
+    })
+
+    await expect(
+      createBooking({ userId: 'u1', showtimeId: 'st1', seatIds: ['s1'] }),
+    ).rejects.toThrow(SeatUnavailableError)
+    expect(mockRelease).toHaveBeenCalledWith(['s1'])
   })
 })
 

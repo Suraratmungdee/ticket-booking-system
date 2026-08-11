@@ -5,7 +5,14 @@ import { MAX_SEATS_PER_BOOKING, SEAT_HOLD_TTL_SECONDS } from './config.js'
 export class SeatUnavailableError extends Error {}
 export class TooManySeatsError extends Error {}
 
-type LockedSeat = { id: string; status: string; price: number; showtimeId: string }
+type LockedSeat = {
+  id: string
+  status: string
+  price: number
+  showtimeId: string
+  showtimeStatus: string
+  showtimeStartTime: Date
+}
 
 export async function createBooking(input: {
   userId: string
@@ -13,6 +20,10 @@ export async function createBooking(input: {
   seatIds: string[]
 }) {
   if (input.seatIds.length < 1 || input.seatIds.length > MAX_SEATS_PER_BOOKING) throw new TooManySeatsError()
+
+  // Sweep first: a seat freed by a booking that just expired must read as
+  // AVAILABLE to this request, not as a stale BOOKED inside the lock below.
+  await expireStaleBookings()
 
   // First gate: cheap, fast, and keeps most contenders out of the DB.
   const held = await acquireSeatHolds(input.seatIds, input.userId)
@@ -29,9 +40,11 @@ export async function createBooking(input: {
       // different orders would each hold one row and wait on the other's,
       // deadlocking. A single global order makes that impossible.
       const seats = await tx.$queryRaw<LockedSeat[]>`
-        SELECT s.id, s.status::text AS status, m.price, m."showtimeId"
+        SELECT s.id, s.status::text AS status, m.price, m."showtimeId",
+               t.status::text AS "showtimeStatus", t."startTime" AS "showtimeStartTime"
         FROM "Seat" s
         JOIN "SeatMap" m ON m.id = s."seatMapId"
+        JOIN "Showtime" t ON t.id = m."showtimeId"
         WHERE s.id = ANY(${input.seatIds}::text[])
         ORDER BY s.id
         FOR UPDATE OF s
@@ -40,6 +53,14 @@ export async function createBooking(input: {
       if (seats.length !== input.seatIds.length) throw new SeatUnavailableError()
       if (seats.some((s) => s.status !== 'AVAILABLE')) throw new SeatUnavailableError()
       if (seats.some((s) => s.showtimeId !== input.showtimeId)) throw new SeatUnavailableError()
+      // A cancelled or already-started showtime can't be booked. Reused
+      // SeatUnavailableError (409) rather than a new error class — a
+      // probing client shouldn't be able to tell "seat taken" from
+      // "showtime dead" apart, and this check lives under the same row
+      // lock as the seat-status checks above.
+      if (seats.some((s) => s.showtimeStatus !== 'SCHEDULED' || s.showtimeStartTime <= new Date())) {
+        throw new SeatUnavailableError()
+      }
 
       // Price comes from the joined SeatMap rows we just locked — never from
       // the request body.
@@ -64,7 +85,10 @@ export async function createBooking(input: {
     })
   } catch (err) {
     // Whatever went wrong, don't leave the seats locked in Redis for 5
-    // minutes — nobody holds a booking for them.
+    // minutes — nobody holds a booking for them. releaseSeatHolds fails
+    // open (see seat-lock.ts) rather than throwing, so a Redis outage here
+    // can't mask the real `err` (e.g. SeatUnavailableError) behind a raw
+    // Redis error and turn a 409 into a 500.
     await releaseSeatHolds(input.seatIds)
     throw err
   }

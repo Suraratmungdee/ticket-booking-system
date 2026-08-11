@@ -54,7 +54,46 @@ describe('assertPaymentProviderIsSafe', () => {
     process.env.PAYMENT_PROVIDER = 'stripe'
     process.env.JWT_SECRET = 'x'
     process.env.PAYMENT_WEBHOOK_SECRET = 'a-real-secret-only-the-provider-and-we-know'
+    process.env.TICKET_SIGNING_SECRET = 'a-real-ticket-secret'
     vi.resetModules()
+    const { assertPaymentProviderIsSafe } = await import('../../../apps/api/src/lib/config')
+    expect(() => assertPaymentProviderIsSafe()).not.toThrow()
+  })
+})
+
+describe('assertPaymentProviderIsSafe — ticket signing secret', () => {
+  it('refuses to boot in production without TICKET_SIGNING_SECRET', async () => {
+    process.env.NODE_ENV = 'production'
+    process.env.PAYMENT_PROVIDER = 'stripe'
+    process.env.JWT_SECRET = 'x'
+    process.env.PAYMENT_WEBHOOK_SECRET = 'a-real-webhook-secret'
+    delete process.env.TICKET_SIGNING_SECRET
+    vi.resetModules()
+
+    const { assertPaymentProviderIsSafe } = await import('../../../apps/api/src/lib/config')
+    expect(() => assertPaymentProviderIsSafe()).toThrow(/TICKET_SIGNING_SECRET/)
+  })
+
+  it('refuses to boot in production with the committed placeholder secret', async () => {
+    process.env.NODE_ENV = 'production'
+    process.env.PAYMENT_PROVIDER = 'stripe'
+    process.env.JWT_SECRET = 'x'
+    process.env.PAYMENT_WEBHOOK_SECRET = 'a-real-webhook-secret'
+    process.env.TICKET_SIGNING_SECRET = 'dev-ticket-secret-change-me'
+    vi.resetModules()
+
+    const { assertPaymentProviderIsSafe } = await import('../../../apps/api/src/lib/config')
+    expect(() => assertPaymentProviderIsSafe()).toThrow(/placeholder/)
+  })
+
+  it('boots in production with a real secret', async () => {
+    process.env.NODE_ENV = 'production'
+    process.env.PAYMENT_PROVIDER = 'stripe'
+    process.env.JWT_SECRET = 'x'
+    process.env.PAYMENT_WEBHOOK_SECRET = 'a-real-webhook-secret'
+    process.env.TICKET_SIGNING_SECRET = 'a-real-ticket-secret'
+    vi.resetModules()
+
     const { assertPaymentProviderIsSafe } = await import('../../../apps/api/src/lib/config')
     expect(() => assertPaymentProviderIsSafe()).not.toThrow()
   })

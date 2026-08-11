@@ -82,6 +82,23 @@ export const PAYMENT_WEBHOOK_SECRET =
 // Where the mock provider posts its webhook back to. Only used by the mock.
 export const API_BASE_URL = process.env.API_BASE_URL ?? 'http://localhost:4000'
 
+// Signs the QR payload on a ticket. Deliberately NOT the same value as
+// PAYMENT_WEBHOOK_SECRET: those are two different trust boundaries, and
+// whoever gets one leaked must not be able to forge the other.
+//
+// LIMITATION: falls back to a dev-only value committed in this repo (so it
+// is not a secret) to keep local boot working without a .env. The guard in
+// assertPaymentProviderIsSafe below makes that fallback unreachable in
+// production.
+const DEV_TICKET_SECRET_FALLBACK = 'dev-ticket-secret-change-me'
+export const TICKET_SIGNING_SECRET =
+  process.env.TICKET_SIGNING_SECRET ?? DEV_TICKET_SECRET_FALLBACK
+
+// Confirmation email. Unset is a supported state: lib/email.ts logs the
+// message instead of sending it, so local dev needs no mail account.
+export const RESEND_API_KEY = process.env.RESEND_API_KEY
+export const EMAIL_FROM = process.env.EMAIL_FROM ?? 'tickets@example.com'
+
 // The mock provider can mark any booking PAID with no money involved. Shipped
 // to production it is a free-tickets endpoint for anyone who finds it, so a
 // production boot with the mock enabled must fail loudly rather than quietly
@@ -107,6 +124,20 @@ export function assertPaymentProviderIsSafe(): void {
   ) {
     throw new Error(
       'PAYMENT_WEBHOOK_SECRET is still the committed .env.example placeholder — set a real secret before deploying to production.',
+    )
+  }
+  // Same failure Phase 3 had to be patched for: a deploy that copied
+  // .env.example verbatim would boot with a publicly known signing key,
+  // letting anyone mint a valid-looking ticket QR for free.
+  if (process.env.NODE_ENV === 'production' && !process.env.TICKET_SIGNING_SECRET) {
+    throw new Error('TICKET_SIGNING_SECRET must be set when NODE_ENV=production')
+  }
+  if (
+    process.env.NODE_ENV === 'production' &&
+    process.env.TICKET_SIGNING_SECRET === DEV_TICKET_SECRET_FALLBACK
+  ) {
+    throw new Error(
+      'TICKET_SIGNING_SECRET is still the committed .env.example placeholder — set a real secret before deploying to production.',
     )
   }
 }

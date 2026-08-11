@@ -2,6 +2,7 @@ import { Router, type RequestHandler } from 'express'
 import { z } from 'zod'
 import { verifyWebhookSignature } from '../lib/webhook-signature.js'
 import { applyPaymentOutcome, PaymentNotFoundError } from '../lib/payment.js'
+import { notifyBookingPaid } from '../lib/email.js'
 import { logServerError } from '../lib/log.js'
 
 const router = Router()
@@ -36,6 +37,21 @@ export const paymentWebhookHandler: RequestHandler = async (req, res) => {
 
   try {
     const result = await applyPaymentOutcome(parsed.data)
+
+    // After the transaction has committed, never inside it: an HTTP call to
+    // a mail provider must not hold a seat-row lock open. Fire-and-forget
+    // because the ticket is already in the database and visible at
+    // /me/tickets — a mail outage must not turn a completed payment into a
+    // 500 that the provider then retries forever.
+    //
+    // `applied` is false on a duplicate delivery, which is what keeps the
+    // confirmation from being sent twice.
+    if (result.applied && result.bookingStatus === 'PAID' && result.bookingId) {
+      void notifyBookingPaid(result.bookingId).catch((err) =>
+        logServerError('confirmation email failed', err),
+      )
+    }
+
     // 200 even when the event was a duplicate: a provider retries on any
     // non-2xx, and re-delivering something already handled helps nobody.
     return res.json({ received: true, applied: result.applied })

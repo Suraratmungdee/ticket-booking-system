@@ -1,7 +1,7 @@
 import { Router, type RequestHandler } from 'express'
 import { z } from 'zod'
 import { verifyWebhookSignature } from '../lib/webhook-signature.js'
-import { applyPaymentOutcome } from '../lib/payment.js'
+import { applyPaymentOutcome, PaymentNotFoundError } from '../lib/payment.js'
 import { logServerError } from '../lib/log.js'
 
 const router = Router()
@@ -41,6 +41,11 @@ export const paymentWebhookHandler: RequestHandler = async (req, res) => {
     return res.json({ received: true, applied: result.applied })
   } catch (err) {
     logServerError('POST /webhooks/payment failed', err)
+    // An unknown providerRef will never start existing on retry — a 500 here
+    // would make a real provider retry this forever. 400 tells it to stop.
+    if (err instanceof PaymentNotFoundError) {
+      return res.status(400).json({ error: 'Invalid payload' })
+    }
     return res.status(500).json({ error: 'Internal server error' })
   }
 }

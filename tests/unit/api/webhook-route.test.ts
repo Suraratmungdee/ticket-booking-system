@@ -1,7 +1,17 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
-const m = vi.hoisted(() => ({ apply: vi.fn() }))
-vi.mock('../../../apps/api/src/lib/payment', () => ({ applyPaymentOutcome: m.apply }))
+// PaymentNotFoundError is defined here (not imported from the real module)
+// so the mocked payment module and this test reference the identical class —
+// webhooks.ts's `err instanceof PaymentNotFoundError` check resolves against
+// this same mock, since vi.mock intercepts every import of that module path.
+const m = vi.hoisted(() => ({
+  apply: vi.fn(),
+  PaymentNotFoundError: class PaymentNotFoundError extends Error {},
+}))
+vi.mock('../../../apps/api/src/lib/payment', () => ({
+  applyPaymentOutcome: m.apply,
+  PaymentNotFoundError: m.PaymentNotFoundError,
+}))
 
 import { paymentWebhookHandler } from '../../../apps/api/src/routes/webhooks'
 import { signWebhookPayload } from '../../../apps/api/src/lib/webhook-signature'
@@ -70,5 +80,27 @@ describe('paymentWebhookHandler', () => {
 
     expect(res.status).not.toHaveBeenCalledWith(500)
     expect(res.json).toHaveBeenCalledWith({ received: true, applied: false })
+  })
+
+  it('maps an unknown providerRef to 400, not a retryable 500', async () => {
+    m.apply.mockRejectedValue(new m.PaymentNotFoundError())
+    const res = makeRes()
+
+    await paymentWebhookHandler(makeReq(raw, signWebhookPayload(raw)), res, vi.fn())
+
+    expect(res.status).toHaveBeenCalledWith(400)
+    expect(res.status).not.toHaveBeenCalledWith(500)
+  })
+
+  // Simulates a caller sending a non-application/json content type, which
+  // would make express.raw skip and leave req.body as whatever upstream
+  // middleware left it — never a Buffer. The Buffer.isBuffer guard must
+  // fail closed here rather than pass a non-Buffer into the HMAC compare.
+  it('rejects a non-Buffer body and never touches the payment layer', async () => {
+    const res = makeRes()
+    await paymentWebhookHandler(makeReq({} as unknown as Buffer, signWebhookPayload(raw)), res, vi.fn())
+
+    expect(res.status).toHaveBeenCalledWith(400)
+    expect(m.apply).not.toHaveBeenCalled()
   })
 })

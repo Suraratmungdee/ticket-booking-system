@@ -144,37 +144,52 @@ describe('createBooking', () => {
 })
 
 describe('expireStaleBookings', () => {
-  function txExpire(bookingUpdateCount = 1) {
-    const findMany = vi.fn().mockResolvedValue([{ id: 'b1', seats: [{ seatId: 's1' }, { seatId: 's2' }] }])
-    const bookingUpdateMany = vi.fn().mockResolvedValue({ count: bookingUpdateCount })
-    const seatUpdateMany = vi.fn().mockResolvedValue({ count: 2 })
-    txRuns({ booking: { findMany, updateMany: bookingUpdateMany }, seat: { updateMany: seatUpdateMany } })
-    return { findMany, bookingUpdateMany, seatUpdateMany }
+  // staleIds is what `$queryRaw ... FOR UPDATE SKIP LOCKED` returns — only
+  // the bookings THIS call actually locked. SKIP LOCKED means a
+  // concurrently-locked stale booking is simply absent here, not
+  // present-but-unwritable, so seatsByBooking can describe more bookings
+  // than staleIds to model "some other booking exists but wasn't locked by
+  // us". bookingSeat.findMany's mock filters by the `where.bookingId.in`
+  // the code under test actually passes, so a test can catch the code
+  // reading a wider set of seats than the bookings it locked.
+  function txExpire(staleIds: string[], seatsByBooking: Record<string, string[]>) {
+    const queryRaw = vi.fn().mockResolvedValue(staleIds.map((id) => ({ id })))
+    const bookingSeatFindMany = vi
+      .fn()
+      .mockImplementation(async ({ where }: { where: { bookingId: { in: string[] } } }) =>
+        where.bookingId.in.flatMap((id) => (seatsByBooking[id] ?? []).map((seatId) => ({ seatId }))),
+      )
+    const bookingUpdateMany = vi.fn().mockResolvedValue({ count: staleIds.length })
+    const seatUpdateMany = vi.fn().mockResolvedValue({ count: 0 })
+    txRuns({
+      $queryRaw: queryRaw,
+      bookingSeat: { findMany: bookingSeatFindMany },
+      booking: { updateMany: bookingUpdateMany },
+      seat: { updateMany: seatUpdateMany },
+    })
+    return { queryRaw, bookingSeatFindMany, bookingUpdateMany, seatUpdateMany }
   }
 
-  it('queries only PENDING_PAYMENT bookings past their expiry, leaving others alone', async () => {
-    const { findMany } = txExpire()
+  it('locks candidate bookings with FOR UPDATE SKIP LOCKED, scoped to PENDING_PAYMENT past expiry', async () => {
+    const { queryRaw } = txExpire(['b1'], { b1: ['s1', 's2'] })
 
     await expireStaleBookings()
 
-    expect(findMany).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: expect.objectContaining({
-          status: 'PENDING_PAYMENT',
-          expiresAt: expect.objectContaining({ lt: expect.any(Date) }),
-        }),
-      }),
-    )
+    expect(queryRaw).toHaveBeenCalledOnce()
+    const sql = (queryRaw.mock.calls[0][0] as TemplateStringsArray).join('')
+    expect(sql).toContain("status = 'PENDING_PAYMENT'")
+    expect(sql).toContain('FOR UPDATE SKIP LOCKED')
   })
 
-  it('returns the expired bookings\' seats to AVAILABLE and reports the count', async () => {
-    const { bookingUpdateMany, seatUpdateMany } = txExpire()
+  it("returns the expired bookings' seats to AVAILABLE and reports the count", async () => {
+    const { bookingUpdateMany, seatUpdateMany } = txExpire(['b1'], { b1: ['s1', 's2'] })
 
     const count = await expireStaleBookings()
 
-    expect(bookingUpdateMany).toHaveBeenCalledWith(
-      expect.objectContaining({ where: expect.objectContaining({ status: 'PENDING_PAYMENT' }) }),
-    )
+    expect(bookingUpdateMany).toHaveBeenCalledWith({
+      where: { id: { in: ['b1'] } },
+      data: { status: 'EXPIRED' },
+    })
     expect(seatUpdateMany).toHaveBeenCalledWith({
       where: { id: { in: ['s1', 's2'] }, status: 'BOOKED' },
       data: { status: 'AVAILABLE' },
@@ -182,27 +197,27 @@ describe('expireStaleBookings', () => {
     expect(count).toBe(1)
   })
 
-  // Pins the fix for the double-book hole: a booking that a concurrent sweep
-  // (or a payment) already moved out of PENDING_PAYMENT must not be
-  // re-expired, and its seats must not be freed out from under whoever
-  // holds them now. The guarded `booking.updateMany` matches 0 rows in that
-  // case. This test fails against the old unguarded version, which ran the
-  // seat update unconditionally and always returned `stale.length`
-  // regardless of how many bookings the update actually touched.
-  it('does not free seats when the guarded booking update matches nothing', async () => {
-    const { seatUpdateMany } = txExpire(0)
+  // The decisive case for the residual Critical: SKIP LOCKED means a
+  // concurrently-held stale booking (b2) never appears in `stale` at all —
+  // only b1, the one this call actually locked, does. Only b1's seats may
+  // be freed. A batch update guarded only by an aggregate count (the
+  // previous fix) would still see count > 0 from b1 alone and go on to free
+  // b2's seats too, because seatIds was computed from the *whole* stale
+  // read before the guard was even checked. Fails against that version —
+  // see the fix-round report for the swapped-file proof.
+  it('frees only the seats of the bookings actually locked and expired, not a wider batch', async () => {
+    const { seatUpdateMany } = txExpire(['b1'], { b1: ['s1', 's2'], b2: ['s3', 's4'] })
 
-    const count = await expireStaleBookings()
+    await expireStaleBookings()
 
-    expect(seatUpdateMany).not.toHaveBeenCalled()
-    expect(count).toBe(0)
+    expect(seatUpdateMany).toHaveBeenCalledWith({
+      where: { id: { in: ['s1', 's2'] }, status: 'BOOKED' },
+      data: { status: 'AVAILABLE' },
+    })
   })
 
   it('does nothing when there are no stale bookings', async () => {
-    const findMany = vi.fn().mockResolvedValue([])
-    const bookingUpdateMany = vi.fn()
-    const seatUpdateMany = vi.fn()
-    txRuns({ booking: { findMany, updateMany: bookingUpdateMany }, seat: { updateMany: seatUpdateMany } })
+    const { bookingUpdateMany, seatUpdateMany } = txExpire([], {})
 
     const count = await expireStaleBookings()
 

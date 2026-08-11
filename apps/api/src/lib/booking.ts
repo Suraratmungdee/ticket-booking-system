@@ -78,34 +78,38 @@ export async function createBooking(input: {
 // promote this to a cron job.
 export async function expireStaleBookings(): Promise<number> {
   return await prisma.$transaction(async (tx) => {
-    const stale = await tx.booking.findMany({
-      where: { status: 'PENDING_PAYMENT', expiresAt: { lt: new Date() } },
-      select: { id: true, seats: { select: { seatId: true } } },
-    })
+    // SKIP LOCKED is the point: a concurrent sweep silently passes over rows
+    // this one already holds, so two sweeps never process the same booking
+    // and can never disagree about whose seats to free. An aggregate count
+    // guard on a batch update isn't enough here — if `stale` held bookings
+    // B1 and B2 and only B1 still matched at update time, the batch would
+    // still report count > 0 and go on to free B2's seat too, even though
+    // B2 never left PENDING_PAYMENT. Locking the candidate rows up front
+    // avoids that entirely: only rows this transaction actually holds are
+    // ever expired or have their seats freed.
+    const stale = await tx.$queryRaw<{ id: string }[]>`
+      SELECT id FROM "Booking"
+      WHERE status = 'PENDING_PAYMENT' AND "expiresAt" < now()
+      FOR UPDATE SKIP LOCKED
+    `
     if (stale.length === 0) return 0
+    const bookingIds = stale.map((b) => b.id)
 
-    const seatIds = stale.flatMap((b) => b.seats.map((s) => s.seatId))
-
-    // Booking update goes first, guarded on status still being
-    // PENDING_PAYMENT. Two concurrent sweeps can both read the same stale
-    // booking before either writes; without the guard, a sweep that read
-    // stale would free seats a *new* booking has since legitimately taken
-    // (booking B expires, seat frees, booking C legitimately takes it, the
-    // other stale sweep then frees the seat out from under C). The guarded
-    // update makes the second sweep match 0 rows once the first commits, so
-    // it returns before touching any seat. `status: 'BOOKED'` on the seat
-    // update is belt-and-braces for the same reason.
-    const expired = await tx.booking.updateMany({
-      where: { id: { in: stale.map((b) => b.id) }, status: 'PENDING_PAYMENT' },
-      data: { status: 'EXPIRED' },
+    // Seats are read from the locked bookings only — never from a wider set.
+    const rows = await tx.bookingSeat.findMany({
+      where: { bookingId: { in: bookingIds } },
+      select: { seatId: true },
     })
-    if (expired.count === 0) return 0
 
+    await tx.booking.updateMany({ where: { id: { in: bookingIds } }, data: { status: 'EXPIRED' } })
+    // `status: 'BOOKED'` is belt-and-braces here — the SKIP LOCKED read
+    // above already guarantees these seats belong only to bookings this
+    // transaction just expired.
     await tx.seat.updateMany({
-      where: { id: { in: seatIds }, status: 'BOOKED' },
+      where: { id: { in: rows.map((r) => r.seatId) }, status: 'BOOKED' },
       data: { status: 'AVAILABLE' },
     })
-    return expired.count
+    return bookingIds.length
   })
 }
 

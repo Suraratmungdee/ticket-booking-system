@@ -1,8 +1,29 @@
 import { prisma } from '../src/lib/prisma.js'
 
+// CLAUDE.md §5: deleting real booking/payment data is never an agent's call
+// to make alone. The deletes below are real and needed for idempotency (the
+// FK chain is RESTRICT, so venues/events can't be re-seeded over old rows
+// without clearing bookings first) — this guard is the safety net, not a
+// reason to remove them. It refuses to run anywhere that isn't plainly a
+// local dev database.
+function assertSeedIsSafe(): void {
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error('Refusing to run prisma/seed.ts with NODE_ENV=production — it deletes Booking/Payment data.')
+  }
+  const url = process.env.DATABASE_URL ?? ''
+  const isLocalhost = /^(postgres(ql)?):\/\/[^@]*@?(localhost|127\.0\.0\.1)(:|\/)/.test(url)
+  if (!isLocalhost) {
+    throw new Error(
+      `Refusing to run prisma/seed.ts against a non-localhost DATABASE_URL — it deletes Booking/Payment data. Got: ${url.replace(/:[^:@/]*@/, ':***@')}`,
+    )
+  }
+}
+
 // Two venues, three events, one showtime each — enough to exercise the
 // /events date and venue filters by hand. Idempotent: clears first.
 async function main() {
+  assertSeedIsSafe()
+
   await prisma.bookingSeat.deleteMany()
   await prisma.booking.deleteMany()
   await prisma.seat.deleteMany()

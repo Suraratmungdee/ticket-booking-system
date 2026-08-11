@@ -45,10 +45,20 @@ describe('webhook idempotency', () => {
     expect(await prisma.webhookEvent.count({ where: { eventId } })).toBe(1)
   })
 
-  // The one that matters. A sequential duplicate check passes even when
-  // idempotency is a SELECT-then-INSERT, because each call finishes before the
-  // next begins — the same blind spot that let a broken rate limiter and a
-  // mis-targeted concurrency test through in earlier phases.
+  // The one that matters. What this actually pins down is the unique index
+  // on WebhookEvent.eventId, not the INSERT-vs-SELECT-then-INSERT wording in
+  // applyPaymentOutcome: with the constraint in place and the insert inside
+  // the same transaction as the effect, either form is race-safe (a losing
+  // INSERT still throws, still rolls back that transaction's effect) —
+  // confirmed by mutating applyPaymentOutcome to SELECT-then-INSERT, which
+  // left both this test and the sequential one green (see task-6-report.md).
+  // The mutation that is expected to actually break this one is dropping the
+  // index itself (`DROP INDEX "WebhookEvent_eventId_key"`, then restore with
+  // `CREATE UNIQUE INDEX ... ON "WebhookEvent"("eventId")`) — see
+  // task-6-report.md for that run's real numbers. A migration that drops,
+  // renames, or fails to recreate that index is the regression this test
+  // exists to catch — the same blind spot that let a broken rate limiter and
+  // a mis-targeted concurrency test through in earlier phases.
   it('applies exactly once when the same event arrives ten times at once', async () => {
     const eventId = `evt_test_${Date.now()}_par`
     const input = { eventId, providerRef: fixture.providerRef, outcome: 'succeeded' as const }

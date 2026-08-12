@@ -171,3 +171,74 @@ export async function createSeatMap(
     return seatMap
   })
 }
+
+// LIMITATION: hard `take: 100`, no pagination. Enough at this data size; once
+// a real deployment passes 100 bookings the older ones become unreachable
+// from this screen and this needs cursor pagination.
+const BOOKING_LIST_LIMIT = 100
+
+export async function listBookings(filters: { status?: string; email?: string }) {
+  return prisma.booking.findMany({
+    where: {
+      ...(filters.status ? { status: filters.status as never } : {}),
+      ...(filters.email
+        ? { user: { email: { contains: filters.email, mode: 'insensitive' as const } } }
+        : {}),
+    },
+    orderBy: { createdAt: 'desc' },
+    take: BOOKING_LIST_LIMIT,
+    include: {
+      user: { select: { email: true, name: true } },
+      showtime: { include: { event: { select: { title: true } } } },
+      seats: { include: { seat: { select: { row: true, number: true } } } },
+    },
+  })
+}
+
+type DashboardRow = {
+  showtimeId: string
+  eventTitle: string
+  startTime: Date
+  totalSeats: number
+  occupiedSeats: number
+  revenue: number
+}
+
+// Seat counts and revenue are aggregated in SEPARATE subqueries on purpose.
+// Joining Seat and Booking in one pass multiplies rows against each other and
+// inflates both numbers.
+//
+// The two figures also count different things, and the UI must label them as
+// such: occupiedSeats comes from Seat.status, which createBooking sets at
+// hold time, so it includes seats held but not yet paid for (correct for
+// "how many are left to sell"). revenue counts only PAID bookings, because
+// PENDING_PAYMENT is not money yet and REFUND_REQUIRED is money owed back.
+// occupiedSeats x price will therefore not equal revenue, and should not.
+export async function getDashboard(): Promise<DashboardRow[]> {
+  return prisma.$queryRaw<DashboardRow[]>`
+    SELECT
+      t.id AS "showtimeId",
+      e.title AS "eventTitle",
+      t."startTime",
+      COALESCE(seats.total, 0)::int AS "totalSeats",
+      COALESCE(seats.occupied, 0)::int AS "occupiedSeats",
+      COALESCE(rev.revenue, 0)::int AS "revenue"
+    FROM "Showtime" t
+    JOIN "Event" e ON e.id = t."eventId"
+    LEFT JOIN (
+      SELECT m."showtimeId",
+             COUNT(*) AS total,
+             COUNT(*) FILTER (WHERE s.status = 'BOOKED') AS occupied
+      FROM "SeatMap" m
+      JOIN "Seat" s ON s."seatMapId" = m.id
+      GROUP BY m."showtimeId"
+    ) seats ON seats."showtimeId" = t.id
+    LEFT JOIN (
+      SELECT b."showtimeId", SUM(b."totalPrice") AS revenue
+      FROM "Booking" b
+      WHERE b.status = 'PAID'
+      GROUP BY b."showtimeId"
+    ) rev ON rev."showtimeId" = t.id
+    ORDER BY t."startTime" DESC
+  `
+}

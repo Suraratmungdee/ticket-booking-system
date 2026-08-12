@@ -11,6 +11,8 @@ import {
   updateShowtime,
   createSeatMap,
   SeatMapTooLargeError,
+  listBookings,
+  getDashboard,
 } from '../lib/admin.js'
 import { requireAuth, requireAdmin } from '../middleware/auth.js'
 import { logServerError } from '../lib/log.js'
@@ -240,6 +242,45 @@ export const createSeatMapHandler: RequestHandler = async (req, res) => {
   }
 }
 
+// Mirrors the BookingStatus enum in schema.prisma. An unknown value is the
+// caller's mistake, not an empty result set that looks like "no bookings".
+const bookingStatusSchema = z.enum([
+  'PENDING_PAYMENT',
+  'PAID',
+  'EXPIRED',
+  'CANCELLED',
+  'REFUND_REQUIRED',
+])
+
+export const listBookingsHandler: RequestHandler = async (req, res) => {
+  const { status, email } = req.query
+
+  if (typeof status === 'string') {
+    const parsed = bookingStatusSchema.safeParse(status)
+    if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
+  }
+
+  try {
+    const bookings = await listBookings({
+      status: typeof status === 'string' ? status : undefined,
+      email: typeof email === 'string' ? email : undefined,
+    })
+    return res.json({ bookings })
+  } catch (err) {
+    logServerError('GET /admin/bookings failed', err)
+    return res.status(500).json({ error: 'Internal server error' })
+  }
+}
+
+export const dashboardHandler: RequestHandler = async (_req, res) => {
+  try {
+    return res.json({ showtimes: await getDashboard() })
+  } catch (err) {
+    logServerError('GET /admin/dashboard failed', err)
+    return res.status(500).json({ error: 'Internal server error' })
+  }
+}
+
 // requireAuth then requireAdmin on every route, with no exceptions. A route
 // added below without both is an unguarded write to the whole catalog.
 router.get('/venues', requireAuth, requireAdmin, listVenuesHandler)
@@ -251,5 +292,7 @@ router.patch('/events/:id', requireAuth, requireAdmin, updateEventHandler)
 router.post('/showtimes', requireAuth, requireAdmin, createShowtimeHandler)
 router.patch('/showtimes/:id', requireAuth, requireAdmin, updateShowtimeHandler)
 router.post('/seatmaps', requireAuth, requireAdmin, createSeatMapHandler)
+router.get('/bookings', requireAuth, requireAdmin, listBookingsHandler)
+router.get('/dashboard', requireAuth, requireAdmin, dashboardHandler)
 
 export default router

@@ -10,15 +10,23 @@ type ConfirmationInput = {
   ticketUrl: string
 }
 
+// No Event-creation endpoint exists yet, so eventTitle can't carry attacker
+// HTML today — but Phase 5 adds admin event CRUD, making this a live stored-
+// injection path very soon. Escape now rather than relying on "nothing
+// writes it yet" staying true.
+function escapeHtml(s: string): string {
+  return s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!)
+}
+
 // Resend's REST API directly over fetch. Their SDK wraps exactly this one
 // POST — a dependency for ten lines is not worth the supply chain.
 export async function sendBookingConfirmation(input: ConfirmationInput): Promise<void> {
   const when = input.startTime.toLocaleString('th-TH', { dateStyle: 'full', timeStyle: 'short' })
   const html =
     `<p>ยืนยันการจองเรียบร้อยแล้ว</p>` +
-    `<p><strong>${input.eventTitle}</strong><br>${when}</p>` +
-    `<p>ที่นั่ง: ${input.seats.join(', ')}</p>` +
-    `<p>รหัสการจอง: ${input.bookingId}</p>` +
+    `<p><strong>${escapeHtml(input.eventTitle)}</strong><br>${when}</p>` +
+    `<p>ที่นั่ง: ${input.seats.map(escapeHtml).join(', ')}</p>` +
+    `<p>รหัสการจอง: ${escapeHtml(input.bookingId)}</p>` +
     `<p><a href="${input.ticketUrl}">เปิดตั๋วและ QR code</a></p>`
 
   // Read from process.env directly (not imported from config): tests swap

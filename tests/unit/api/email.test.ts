@@ -46,6 +46,30 @@ describe('sendBookingConfirmation', () => {
     expect(body.html).toContain('A1')
   })
 
+  // Nothing writes an Event today, so eventTitle can't carry attacker HTML
+  // yet — but Phase 5 adds admin event CRUD, making this a live
+  // stored-injection path soon. Locks in that the escape actually escapes,
+  // not just that unrelated assertions still happen to pass.
+  it('escapes HTML-special characters in event title, seats, and booking id', async () => {
+    process.env.RESEND_API_KEY = 'test-key'
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200, text: async () => '' })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const { sendBookingConfirmation } = await import('../../../apps/api/src/lib/email')
+    await sendBookingConfirmation({
+      ...INPUT,
+      eventTitle: '<script>alert(1)</script>',
+      seats: ['<b>A1</b>'],
+      bookingId: '"><img>',
+    })
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body)
+    expect(body.html).not.toContain('<script>')
+    expect(body.html).not.toContain('<b>A1</b>')
+    expect(body.html).not.toContain('"><img>')
+    expect(body.html).toContain('&lt;script&gt;')
+  })
+
   it('logs instead of sending when no API key is configured', async () => {
     delete process.env.RESEND_API_KEY
     const fetchMock = vi.fn()

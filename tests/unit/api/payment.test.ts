@@ -319,6 +319,9 @@ describe('applyPaymentOutcome', () => {
       }),
     )
     expect(result.bookingStatus).toBe('PAID')
+    // A genuine first move into PAID — the flag the webhook route trusts to
+    // decide whether to send the confirmation email.
+    expect(result.transitioned).toBe(true)
   })
 
   // The compare-and-swap that closes CRITICAL 1: expireStaleBookings() can
@@ -366,6 +369,8 @@ describe('applyPaymentOutcome', () => {
       expect.objectContaining({ data: expect.objectContaining({ status: 'PAID' }) }),
     )
     expect(result.bookingStatus).toBe('PAID')
+    // Recover-when-free is also a genuine first move into PAID.
+    expect(result.transitioned).toBe(true)
   })
 
   it('falls through to the seat re-check when the expiry sweep wins the race, and flags REFUND_REQUIRED when a seat is gone', async () => {
@@ -404,6 +409,8 @@ describe('applyPaymentOutcome', () => {
       expect.objectContaining({ data: expect.objectContaining({ status: 'REFUND_REQUIRED' }) }),
     )
     expect(result.bookingStatus).toBe('REFUND_REQUIRED')
+    // REFUND_REQUIRED must never look like a transition to PAID.
+    expect(result.transitioned).toBeFalsy()
   })
 
   // The compare-and-swap that closes IMPORTANT 2: a checkout retry's own CAS
@@ -470,8 +477,9 @@ describe('applyPaymentOutcome', () => {
       booking: { update: bookingUpdate },
     })
 
-    await applyPaymentOutcome({ eventId: 'evt_4', providerRef: 'ref_1', outcome: 'succeeded' })
+    const result = await applyPaymentOutcome({ eventId: 'evt_4', providerRef: 'ref_1', outcome: 'succeeded' })
 
+    expect(result.transitioned).toBe(true)
     expect(seatUpdateMany).toHaveBeenCalledWith(
       expect.objectContaining({ data: { status: 'BOOKED' } }),
     )
@@ -515,7 +523,16 @@ describe('applyPaymentOutcome', () => {
     )
   })
 
-  it('does nothing when the booking is already PAID', async () => {
+  // Redelivery of an already-applied success under a *different* eventId
+  // (evt_6 here, vs. whatever eventId first paid this booking) is normal
+  // at-least-once delivery — the WebhookEvent unique constraint only dedupes
+  // an identical eventId, so this path is reached, not short-circuited
+  // earlier. It must return the same { applied: true, bookingStatus: 'PAID' }
+  // shape a fresh transition returns (nothing here breaks the booking), but
+  // `transitioned` must stay falsy — that is the one signal that stops the
+  // webhook route from re-sending the confirmation email on every
+  // redelivery a payment provider makes.
+  it('does nothing when the booking is already PAID, and does not report a transition', async () => {
     const bookingUpdate = vi.fn()
     txRuns({
       webhookEvent: { create: vi.fn().mockResolvedValue({}) },
@@ -531,9 +548,11 @@ describe('applyPaymentOutcome', () => {
       booking: { update: bookingUpdate },
     })
 
-    await applyPaymentOutcome({ eventId: 'evt_6', providerRef: 'ref_1', outcome: 'succeeded' })
+    const result = await applyPaymentOutcome({ eventId: 'evt_6', providerRef: 'ref_1', outcome: 'succeeded' })
 
     expect(bookingUpdate).not.toHaveBeenCalled()
+    expect(result).toEqual({ applied: true, bookingStatus: 'PAID', bookingId: 'b1' })
+    expect(result.transitioned).toBeFalsy()
   })
 
   // REFUND_REQUIRED is terminal: a duplicate success delivered after the

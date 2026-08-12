@@ -93,7 +93,7 @@ export async function applyPaymentOutcome(input: {
   eventId: string
   providerRef: string
   outcome: 'succeeded' | 'failed'
-}): Promise<{ applied: boolean; bookingStatus?: string; bookingId?: string }> {
+}): Promise<{ applied: boolean; bookingStatus?: string; bookingId?: string; transitioned?: boolean }> {
   return await prisma.$transaction(async (tx) => {
     // Idempotency: the unique constraint is the arbiter, not a prior read.
     // A SELECT-then-INSERT would let two simultaneous deliveries both miss
@@ -164,6 +164,11 @@ export async function applyPaymentOutcome(input: {
       // a duplicate-key error propagate and abort the transaction (see the
       // comment on issueTicket), so calling it again on a path that changed
       // nothing would only roll back this otherwise-harmless no-op.
+      //
+      // transitioned is deliberately omitted (not false): this is the exact
+      // re-delivery case transitioned exists to flag. Leaving it unset keeps
+      // callers checking `if (result.transitioned)` — never `!== false` —
+      // from accidentally treating this as a fresh transition.
       return { applied: true, bookingStatus: 'PAID', bookingId: payment.bookingId }
     }
 
@@ -182,7 +187,15 @@ export async function applyPaymentOutcome(input: {
         // Same transaction as the status change: PAID without a ticket is a
         // state no reader should ever be able to observe.
         await issueTicket(tx, payment.bookingId)
-        return { applied: true, bookingStatus: 'PAID', bookingId: payment.bookingId }
+        // transitioned: true marks this as an actual first move into PAID —
+        // the only signal the caller (the webhook route, deciding whether to
+        // send the confirmation email) can trust. `bookingStatus === 'PAID'`
+        // alone is not enough: a re-delivery of an already-applied success
+        // under a different eventId (normal for at-least-once delivery)
+        // falls through to the already-PAID early return below with the
+        // exact same { applied: true, bookingStatus: 'PAID' } shape, and
+        // that must NOT re-send the email.
+        return { applied: true, bookingStatus: 'PAID', bookingId: payment.bookingId, transitioned: true }
       }
       // Lost to the expiry sweep — fall through to the recover-or-
       // REFUND_REQUIRED branch below, which re-locks the seats and decides
@@ -208,7 +221,9 @@ export async function applyPaymentOutcome(input: {
       await tx.seat.updateMany({ where: { id: { in: seatIds } }, data: { status: 'BOOKED' } })
       await tx.booking.update({ where: { id: payment.bookingId }, data: { status: 'PAID' } })
       await issueTicket(tx, payment.bookingId)
-      return { applied: true, bookingStatus: 'PAID', bookingId: payment.bookingId }
+      // Also a genuine first transition into PAID — see the comment on the
+      // compare-and-swap win above.
+      return { applied: true, bookingStatus: 'PAID', bookingId: payment.bookingId, transitioned: true }
     }
 
     // LIMITATION: this only records that a refund is owed. Nothing pays it

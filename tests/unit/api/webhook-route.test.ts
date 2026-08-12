@@ -109,7 +109,7 @@ describe('paymentWebhookHandler', () => {
 
 describe('paymentWebhookHandler — confirmation email', () => {
   it('sends the confirmation after a successful payment', async () => {
-    m.apply.mockResolvedValue({ applied: true, bookingStatus: 'PAID', bookingId: 'b1' })
+    m.apply.mockResolvedValue({ applied: true, bookingStatus: 'PAID', bookingId: 'b1', transitioned: true })
     m.notify.mockResolvedValue(undefined)
     const res = makeRes()
 
@@ -117,6 +117,22 @@ describe('paymentWebhookHandler — confirmation email', () => {
 
     expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ received: true }))
     expect(m.notify).toHaveBeenCalledWith('b1')
+  })
+
+  // Redelivery of an already-applied success under a *different* eventId is
+  // normal for at-least-once delivery. applyPaymentOutcome's already-PAID
+  // early return has the identical { applied: true, bookingStatus: 'PAID' }
+  // shape a fresh transition returns — only `transitioned` (absent here)
+  // tells the two apart. Guarding on bookingStatus alone would re-send the
+  // confirmation on every such redelivery.
+  it('does not send when the outcome is a re-delivery of an already-PAID booking', async () => {
+    m.apply.mockResolvedValue({ applied: true, bookingStatus: 'PAID', bookingId: 'b1' })
+    const res = makeRes()
+
+    await paymentWebhookHandler(makeReq(raw, signWebhookPayload(raw)), res, vi.fn())
+
+    expect(m.notify).not.toHaveBeenCalled()
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ received: true }))
   })
 
   // `applied: false` is what a duplicate delivery returns. This is the only

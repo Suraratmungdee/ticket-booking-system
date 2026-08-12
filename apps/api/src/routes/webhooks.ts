@@ -44,9 +44,16 @@ export const paymentWebhookHandler: RequestHandler = async (req, res) => {
     // /me/tickets — a mail outage must not turn a completed payment into a
     // 500 that the provider then retries forever.
     //
-    // `applied` is false on a duplicate delivery, which is what keeps the
-    // confirmation from being sent twice.
-    if (result.applied && result.bookingStatus === 'PAID' && result.bookingId) {
+    // Guard on `transitioned`, not `bookingStatus === 'PAID'`: a re-delivery
+    // of an already-applied success under a *different* eventId (normal for
+    // at-least-once delivery) also returns bookingStatus 'PAID' — the same
+    // shape a genuine first transition returns. `applied` only dedupes a
+    // repeated identical eventId (the WebhookEvent unique constraint), not
+    // this case. `transitioned` is true only on the two paths in
+    // applyPaymentOutcome that actually move a booking into PAID for the
+    // first time, so it is the one flag that will not re-send the email on
+    // every re-delivery a payment provider makes.
+    if (result.transitioned && result.bookingId) {
       void notifyBookingPaid(result.bookingId).catch((err) =>
         logServerError('confirmation email failed', err),
       )

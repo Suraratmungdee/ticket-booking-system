@@ -19,6 +19,15 @@ const app = express()
 // when a trusted reverse proxy actually sits in front of this process.
 if (TRUST_PROXY) {
   app.set('trust proxy', true)
+} else if (process.env.NODE_ENV === 'production') {
+  // A warning, not a throw: a deploy straight onto a VPS with no proxy is a
+  // correct configuration, and refusing to boot would block it. But the
+  // opposite mistake is silent and expensive — behind a proxy with this off,
+  // every request arrives as the proxy's IP, so five wrong passwords from one
+  // attacker lock every user out of login for the window.
+  console.warn(
+    'TRUST_PROXY is off in production. If this process sits behind a reverse proxy (most PaaS do), every request arrives as the proxy IP and the login rate limiter will lock all users out together. If nothing proxies this process, leaving it off is correct — see docs/DEPLOYMENT.md.',
+  )
 }
 
 // Mounted before cors() and every route, so even a CORS rejection or an

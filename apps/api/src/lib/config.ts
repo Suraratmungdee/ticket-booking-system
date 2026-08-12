@@ -63,6 +63,18 @@ export const MAX_SEATS_PER_BOOKING = 8
 // The point of the cap is that one request cannot ask for a million rows.
 export const MAX_SEATS_PER_SEATMAP = 100
 
+// Seat-hold guard. MAX_SEATS_PER_BOOKING caps one booking, not how many
+// bookings a user may open — without this, one account can hold a whole
+// showtime a few seats at a time. Keyed on the authenticated user id rather
+// than the IP: /showtimes/:id/seats/hold requires a session anyway, and a
+// user id comes from a JWT we signed instead of a header a client can set,
+// so this bucket is unaffected by whether TRUST_PROXY is on.
+//
+// 10 per minute leaves room for someone changing their mind repeatedly while
+// picking seats, and still bounds how fast one account can accumulate holds.
+export const BOOKING_RATE_LIMIT_MAX = 10
+export const BOOKING_RATE_LIMIT_WINDOW_MS = 60 * 1000
+
 export const REDIS_URL = process.env.REDIS_URL ?? 'redis://localhost:6379'
 
 // 'mock' runs a self-hosted fake provider so the payment flow can be

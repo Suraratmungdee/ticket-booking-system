@@ -150,4 +150,38 @@ describe('POST /showtimes/:id/seats/hold rate limit', () => {
     for (let i = 0; i < BOOKING_RATE_LIMIT_MAX - 1; i++) recordBookingAttempt('user-3')
     expect(isBookingRateLimited('user-3')).toBe(true)
   })
+
+  it('caps a concurrent burst at the limit instead of letting every parallel request through', async () => {
+    // Regression test for the check-then-act race: firing requests
+    // sequentially (like the tests above) can never see this bug, because
+    // the increment always lands before the next request's check runs. A
+    // real concurrent burst is the only shape that exercises it — with the
+    // old post-await increment, every request in the burst reads the same
+    // pre-increment count and none of them observe each other's attempts,
+    // so the whole burst reaches createBooking and none get 429.
+    resetRateLimitState()
+    m.createBooking.mockResolvedValue({
+      id: 'b1',
+      status: 'PENDING_PAYMENT',
+      totalPrice: 1000,
+      expiresAt: new Date(),
+    })
+    const burstSize = BOOKING_RATE_LIMIT_MAX * 4
+
+    const responses = await Promise.all(
+      Array.from({ length: burstSize }, async () => {
+        const res = makeRes()
+        await holdSeatsHandler(holdReq('user-1'), res, vi.fn())
+        return res
+      }),
+    )
+
+    const statusesUsed = responses.map((res) => res.status.mock.calls[0][0])
+    const reachedBooking = statusesUsed.filter((s) => s === 201).length
+    const blocked429 = statusesUsed.filter((s) => s === 429).length
+
+    expect(reachedBooking).toBe(BOOKING_RATE_LIMIT_MAX)
+    expect(blocked429).toBe(burstSize - BOOKING_RATE_LIMIT_MAX)
+    expect(m.createBooking).toHaveBeenCalledTimes(BOOKING_RATE_LIMIT_MAX)
+  })
 })

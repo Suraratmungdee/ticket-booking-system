@@ -34,7 +34,11 @@ export const getTicketHandler: RequestHandler = async (req, res) => {
 
     // Rendered here so the browser never has to know what the payload means.
     const qrDataUrl = await QRCode.toDataURL(ticket.qrCodePayload, { margin: 1, width: 320 })
-    return res.json({ ticket: { ...ticket, qrDataUrl } })
+    // Same reasoning as listTicketsForUser in lib/ticket.ts: the raw signed
+    // payload has no reason to leave the server once it's been rendered into
+    // qrDataUrl. Omit it here too rather than only from the list response.
+    const { qrCodePayload: _qrCodePayload, ...ticketWithoutPayload } = ticket
+    return res.json({ ticket: { ...ticketWithoutPayload, qrDataUrl } })
   } catch (err) {
     logServerError('GET /tickets/:id failed', err)
     return res.status(500).json({ error: 'Internal server error' })

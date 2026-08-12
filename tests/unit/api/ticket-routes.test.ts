@@ -101,7 +101,11 @@ describe('GET /tickets/:id', () => {
       vi.fn(),
     )
     expect(res.statusCode).toBe(200)
-    const body = res.body as { ticket: { qrDataUrl: string } }
+    const body = res.body as { ticket: { qrDataUrl: string; qrCodePayload?: string } }
     expect(body.ticket.qrDataUrl).toMatch(/^data:image\/png;base64,/)
+    // The raw signed payload must not leave the server once it has been
+    // rendered into qrDataUrl — same reasoning as the list endpoint omitting
+    // it (see lib/ticket.ts).
+    expect(body.ticket.qrCodePayload).toBeUndefined()
   })
 })

@@ -28,16 +28,21 @@ export default function AdminEventsPage() {
   const [description, setDescription] = useState('')
   const [venueId, setVenueId] = useState('')
 
-  async function load(): Promise<void> {
+  // load() runs both from the effect below and from post-create refresh
+  // handlers. The cancelled flag has to live outside load() and be passed
+  // in — a flag declared inside the function body would reset on every
+  // call and guard nothing.
+  async function load(cancelled: { current: boolean }): Promise<void> {
     let vres: Response
     let eres: Response
     try {
       ;[vres, eres] = await Promise.all([apiFetch('/admin/venues'), apiFetch('/admin/events')])
     } catch (err) {
       console.error(err)
-      setError('เชื่อมต่อเซิร์ฟเวอร์ไม่สำเร็จ กรุณาลองใหม่อีกครั้ง')
+      if (!cancelled.current) setError('เชื่อมต่อเซิร์ฟเวอร์ไม่สำเร็จ กรุณาลองใหม่อีกครั้ง')
       return
     }
+    if (cancelled.current) return
     if (vres.status === 401 || eres.status === 401) {
       router.push('/login')
       return
@@ -50,12 +55,20 @@ export default function AdminEventsPage() {
       setError('โหลดข้อมูลไม่สำเร็จ')
       return
     }
-    setVenues((await vres.json()).venues)
-    setEvents((await eres.json()).events)
+    const venuesData = (await vres.json()).venues
+    if (cancelled.current) return
+    const eventsData = (await eres.json()).events
+    if (cancelled.current) return
+    setVenues(venuesData)
+    setEvents(eventsData)
   }
 
   useEffect(() => {
-    void load()
+    const cancelled = { current: false }
+    void load(cancelled)
+    return () => {
+      cancelled.current = true
+    }
     // load() is defined in this component and only touches state setters.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
@@ -126,7 +139,10 @@ export default function AdminEventsPage() {
             if (await submit('/admin/venues', { name: venueName, address: venueAddress })) {
               setVenueName('')
               setVenueAddress('')
-              await load()
+              // A fresh flag, not the effect's: this call is from a button
+              // click while the component is known to be mounted, and must
+              // not inherit a stale cancellation from an earlier render.
+              await load({ current: false })
             }
           }}
           className="bg-black text-white p-2 rounded disabled:bg-gray-400"
@@ -173,7 +189,10 @@ export default function AdminEventsPage() {
               setTitle('')
               setDescription('')
               setVenueId('')
-              await load()
+              // A fresh flag, not the effect's: this call is from a button
+              // click while the component is known to be mounted, and must
+              // not inherit a stale cancellation from an earlier render.
+              await load({ current: false })
             }
           }}
           className="bg-black text-white p-2 rounded disabled:bg-gray-400"

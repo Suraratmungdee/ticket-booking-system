@@ -38,15 +38,20 @@ export default function AdminEventShowtimesPage({ params }: { params: Promise<{ 
   const [rowsText, setRowsText] = useState('')
   const [seatsPerRow, setSeatsPerRow] = useState('')
 
-  async function load(): Promise<void> {
+  // load() runs both from the effect below and from post-create refresh
+  // handlers. The cancelled flag has to live outside load() and be passed
+  // in — a flag declared inside the function body would reset on every
+  // call and guard nothing.
+  async function load(cancelled: { current: boolean }): Promise<void> {
     let res: Response
     try {
       res = await apiFetch('/admin/events')
     } catch (err) {
       console.error(err)
-      setError('เชื่อมต่อเซิร์ฟเวอร์ไม่สำเร็จ กรุณาลองใหม่อีกครั้ง')
+      if (!cancelled.current) setError('เชื่อมต่อเซิร์ฟเวอร์ไม่สำเร็จ กรุณาลองใหม่อีกครั้ง')
       return
     }
+    if (cancelled.current) return
     if (res.status === 401) {
       router.push('/login')
       return
@@ -60,6 +65,7 @@ export default function AdminEventShowtimesPage({ params }: { params: Promise<{ 
       return
     }
     const data = await res.json()
+    if (cancelled.current) return
     // Display concern, not business logic: the API returns every event, and
     // this page shows the one the route already names.
     const found = (data.events as EventDetail[]).find((e) => e.id === id)
@@ -71,7 +77,11 @@ export default function AdminEventShowtimesPage({ params }: { params: Promise<{ 
   }
 
   useEffect(() => {
-    void load()
+    const cancelled = { current: false }
+    void load(cancelled)
+    return () => {
+      cancelled.current = true
+    }
     // load() is defined in this component and only touches state setters.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id])
@@ -184,7 +194,10 @@ export default function AdminEventShowtimesPage({ params }: { params: Promise<{ 
             if (result.ok) {
               setStartTime('')
               setEndTime('')
-              await load()
+              // A fresh flag, not the effect's: this call is from a button
+              // click while the component is known to be mounted, and must
+              // not inherit a stale cancellation from an earlier render.
+              await load({ current: false })
             } else if (result.message) {
               setFormError(result.message)
             }
@@ -274,7 +287,10 @@ export default function AdminEventShowtimesPage({ params }: { params: Promise<{ 
               setPrice('')
               setRowsText('')
               setSeatsPerRow('')
-              await load()
+              // A fresh flag, not the effect's: this call is from a button
+              // click while the component is known to be mounted, and must
+              // not inherit a stale cancellation from an earlier render.
+              await load({ current: false })
             } else if (result.message) {
               setFormError(result.message)
             }

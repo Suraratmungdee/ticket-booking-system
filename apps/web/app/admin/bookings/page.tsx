@@ -37,7 +37,11 @@ export default function AdminBookingsPage() {
   const [statusFilter, setStatusFilter] = useState('')
   const [emailFilter, setEmailFilter] = useState('')
 
-  async function load(status: string, email: string): Promise<void> {
+  // load() runs both from the effect below and from the filter form's
+  // submit handler. The cancelled flag has to live outside load() and be
+  // passed in — a flag declared inside the function body would reset on
+  // every call and guard nothing.
+  async function load(status: string, email: string, cancelled: { current: boolean }): Promise<void> {
     const query = new URLSearchParams()
     if (status) query.set('status', status)
     if (email) query.set('email', email)
@@ -48,9 +52,10 @@ export default function AdminBookingsPage() {
       res = await apiFetch(`/admin/bookings${qs ? `?${qs}` : ''}`)
     } catch (err) {
       console.error(err)
-      setError('เชื่อมต่อเซิร์ฟเวอร์ไม่สำเร็จ กรุณาลองใหม่อีกครั้ง')
+      if (!cancelled.current) setError('เชื่อมต่อเซิร์ฟเวอร์ไม่สำเร็จ กรุณาลองใหม่อีกครั้ง')
       return
     }
+    if (cancelled.current) return
     if (res.status === 401) {
       router.push('/login')
       return
@@ -64,11 +69,16 @@ export default function AdminBookingsPage() {
       return
     }
     const data = await res.json()
+    if (cancelled.current) return
     setBookings(data.bookings)
   }
 
   useEffect(() => {
-    void load('', '')
+    const cancelled = { current: false }
+    void load('', '', cancelled)
+    return () => {
+      cancelled.current = true
+    }
     // load() is defined in this component and only touches state setters.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
@@ -93,7 +103,10 @@ export default function AdminBookingsPage() {
         className="flex flex-wrap items-end gap-4"
         onSubmit={(e) => {
           e.preventDefault()
-          void load(statusFilter, emailFilter)
+          // A fresh flag, not the effect's: this call is from a form submit
+          // while the component is known to be mounted, and must not
+          // inherit a stale cancellation from an earlier render.
+          void load(statusFilter, emailFilter, { current: false })
         }}
       >
         <div className="flex flex-col gap-1">

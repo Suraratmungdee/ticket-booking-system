@@ -31,6 +31,43 @@ export async function createBooking(input: {
 
   try {
     return await prisma.$transaction(async (tx) => {
+      // Lock the Showtime row FIRST, in its own statement, before touching
+      // any Seat row. This closes the race with updateShowtime (which takes
+      // the identical `FOR UPDATE` on this row before writing startTime —
+      // see admin.ts): once we hold this lock, updateShowtime cannot commit
+      // a change to startTime/status until we commit or roll back, so the
+      // showtimeStatus/showtimeStartTime read a few lines below via the
+      // seat join is guaranteed not to go stale between that read and our
+      // decision.
+      //
+      // Deliberately NOT folded into the seat query below as
+      // `FOR UPDATE OF s, t` (as a first draft of this fix did). Postgres's
+      // LockRows executor locks a joined query's marked relations per
+      // *output row*, in range-table order — so for a query joining Seat to
+      // Showtime, each row locks its Seat tuple, then (the first time)
+      // locks the Showtime tuple, before the next row is even fetched. That
+      // attaches the Showtime lock to whichever seat happens to be each
+      // transaction's own first-processed row — and that "first seat"
+      // differs between two createBooking calls requesting different,
+      // overlapping seat sets for the same showtime (e.g. {A,B} vs {B,C}).
+      // That allows: txn1 locks A, then locks the showtime; txn2
+      // concurrently locks B, then blocks on the showtime (held by txn1);
+      // txn1 then tries to lock B and blocks on txn2 — a genuine deadlock,
+      // not merely a theoretical one, since "two customers picking
+      // different-but-overlapping seats for the same popular showtime" is
+      // this system's central case. A combined multi-relation FOR UPDATE
+      // cannot express "always lock the showtime before any seat, for every
+      // caller" — only two separate, ordered statements can, which is what
+      // this does. See task-1-report.md for the full deadlock analysis.
+      //
+      // The result is discarded on purpose: a bogus/mismatched showtimeId
+      // just locks zero rows here, and the seat checks below (showtimeId
+      // mismatch, or zero seats matched) already turn that into the same
+      // SeatUnavailableError a real caller would hit.
+      await tx.$queryRaw`
+        SELECT id FROM "Showtime" WHERE id = ${input.showtimeId} FOR UPDATE
+      `
+
       // The authority. FOR UPDATE blocks any concurrent transaction asking for
       // these same rows until we commit, so the status we read cannot go stale
       // between the check and the write — the check-then-act race that makes

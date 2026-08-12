@@ -4,6 +4,7 @@ const m = vi.hoisted(() => ({
   transaction: vi.fn(),
   showtimeCreate: vi.fn(),
   showtimeUpdate: vi.fn(),
+  showtimeQueryRaw: vi.fn(),
   seatMapCreate: vi.fn(),
   auditCreate: vi.fn(),
 }))
@@ -12,6 +13,7 @@ vi.mock('../../../apps/api/src/lib/prisma', () => ({ prisma: { $transaction: m.t
 
 import {
   createShowtime,
+  updateShowtime,
   createSeatMap,
   SeatMapTooLargeError,
 } from '../../../apps/api/src/lib/admin'
@@ -31,6 +33,7 @@ function txRuns() {
       showtime: { create: m.showtimeCreate, update: m.showtimeUpdate },
       seatMap: { create: m.seatMapCreate },
       adminAuditLog: { create: m.auditCreate },
+      $queryRaw: m.showtimeQueryRaw,
     }),
   )
 }
@@ -75,6 +78,36 @@ describe('createShowtime', () => {
     })
 
     expect(m.showtimeCreate.mock.calls[0][0].data).not.toHaveProperty('status')
+  })
+})
+
+describe('updateShowtime', () => {
+  it('locks the showtime row before writing, so a concurrent booking cannot read a stale start time', async () => {
+    m.showtimeQueryRaw.mockResolvedValue([{ id: 'st1' }])
+    m.showtimeUpdate.mockResolvedValue({ id: 'st1' })
+
+    await updateShowtime('admin-1', 'st1', {
+      startTime: new Date('2026-09-02T12:00:00Z'),
+    })
+
+    // The lock must be taken, and taken before the write — createBooking
+    // reads startTime under a lock that covers only the Seat rows, so this
+    // row lock is the only thing serialising the two.
+    expect(m.showtimeQueryRaw).toHaveBeenCalledTimes(1)
+    expect(m.showtimeQueryRaw.mock.invocationCallOrder[0]).toBeLessThan(
+      m.showtimeUpdate.mock.invocationCallOrder[0],
+    )
+  })
+
+  it('404s rather than writing when the showtime does not exist', async () => {
+    m.showtimeQueryRaw.mockResolvedValue([])
+
+    await expect(
+      updateShowtime('admin-1', 'missing', { startTime: new Date('2026-09-02T12:00:00Z') }),
+    ).rejects.toThrow()
+
+    expect(m.showtimeUpdate).not.toHaveBeenCalled()
+    expect(m.auditCreate).not.toHaveBeenCalled()
   })
 })
 

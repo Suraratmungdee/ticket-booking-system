@@ -53,10 +53,13 @@ export async function createBooking(input: {
       // the seat query, the seat updateMany, and the booking/BookingSeat
       // inserts. FOR UPDATE here would turn per-seat contention into
       // per-showtime serialisation and risk Prisma's 5s $transaction
-      // timeout under burst load. (FOR KEY SHARE would NOT work: it only
-      // conflicts with updates that change the key, and updateShowtime's
-      // UPDATE is a non-key update — FOR KEY SHARE would silently let two
-      // conflicting transactions both proceed.)
+      // timeout under burst load. (FOR KEY SHARE would also work here: it
+      // conflicts with FOR UPDATE regardless of whether the update touches a
+      // key column, and updateShowtime takes an explicit `SELECT ... FOR
+      // UPDATE` before writing rather than relying on the implicit non-key
+      // lock a bare UPDATE would take — so the two still serialise. FOR
+      // SHARE is used anyway because it's the more conservative choice, not
+      // because FOR KEY SHARE would fail.)
       //
       // Deliberately NOT folded into the seat query below as
       // `FOR UPDATE OF s, t` (as a first draft of this fix did). Postgres's

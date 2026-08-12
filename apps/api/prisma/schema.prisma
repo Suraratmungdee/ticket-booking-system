@@ -81,6 +81,11 @@ model SeatMap {
   zoneName   String
   price      Int
   seats      Seat[]
+
+  // One zone name per showtime. Without this, a repeated POST silently
+  // creates a second "VIP" zone rather than failing, and the per-zone seat
+  // cap stops bounding the showtime's total.
+  @@unique([showtimeId, zoneName])
 }
 
 model Seat {

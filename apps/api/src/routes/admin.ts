@@ -230,13 +230,13 @@ export const createSeatMapHandler: RequestHandler = async (req, res) => {
         .json({ error: `A seat map may contain at most ${MAX_SEATS_PER_SEATMAP} seats` })
     }
     if (isPrismaCode(err, 'P2003')) return res.status(400).json({ error: 'Unknown showtimeId' })
-    // seatMapCreateSchema's rows.refine rejects duplicate row labels up
-    // front, so a duplicate (seatMapId, row, number) is not expected to
-    // reach the database. P2002 is deliberately left unhandled here rather
-    // than caught: if it ever surfaces, that means the schema's guard was
-    // bypassed or missed a case, and it should show up as a loud 500, not be
-    // swallowed. Never catch a constraint error and continue inside a
-    // transaction: Postgres has already aborted it.
+    // The unique index on (showtimeId, zoneName). A repeated submit is the
+    // caller's mistake, not a server fault. Note this is a *mapping*, not a
+    // swallow: the transaction has already aborted, and nothing continues
+    // past it.
+    if (isPrismaCode(err, 'P2002')) {
+      return res.status(409).json({ error: 'That zone already exists for this showtime' })
+    }
     logServerError('POST /admin/seatmaps failed', err)
     return res.status(500).json({ error: 'Internal server error' })
   }

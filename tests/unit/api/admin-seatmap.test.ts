@@ -249,4 +249,26 @@ describe('createSeatMapHandler', () => {
     expect(res.status).toHaveBeenCalledWith(400)
     expect(m.transaction).not.toHaveBeenCalled()
   })
+
+  it('maps a duplicate zone name to 409 rather than a 500', async () => {
+    m.seatMapCreate.mockRejectedValue(Object.assign(new Error('dup'), { code: 'P2002' }))
+    const res = fakeRes()
+
+    await createSeatMapHandler(
+      {
+        body: {
+          showtimeId: 'st1',
+          zoneName: 'VIP',
+          price: 1500,
+          rows: ['A'],
+          seatsPerRow: 2,
+        },
+        user: { id: 'admin-1' },
+      } as never,
+      res,
+      vi.fn(),
+    )
+
+    expect(res.status).toHaveBeenCalledWith(409)
+  })
 })

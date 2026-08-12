@@ -106,6 +106,7 @@ model Booking {
   expiresAt  DateTime
   seats      BookingSeat[]
   payment    Payment?
+  ticket     Ticket?
 
   @@index([status, expiresAt])
 }
@@ -140,4 +141,19 @@ model WebhookEvent {
   id         String   @id @default(cuid())
   eventId    String   @unique
   receivedAt DateTime @default(now())
+}
+
+// One ticket per booking (a booking already holds N seats). bookingId is
+// @unique for the same reason WebhookEvent.eventId is: a duplicate webhook
+// delivery must lose to the constraint rather than mint a second ticket.
+// Checking "does a ticket exist" before inserting is a check-then-act race
+// under parallel delivery — the constraint is the only thing that holds.
+model Ticket {
+  id            String   @id @default(cuid())
+  bookingId     String   @unique
+  booking       Booking  @relation(fields: [bookingId], references: [id])
+  // Stored rather than recomputed on read: if the signing secret is ever
+  // rotated, tickets already handed out must stay readable.
+  qrCodePayload String
+  issuedAt      DateTime @default(now())
 }

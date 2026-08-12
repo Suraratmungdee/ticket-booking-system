@@ -6,6 +6,7 @@ const m = vi.hoisted(() => ({
   paymentCreate: vi.fn(),
   paymentUpdateMany: vi.fn(),
   transaction: vi.fn(),
+  ticketCreate: vi.fn(),
 }))
 
 vi.mock('../../../apps/api/src/lib/prisma', () => ({
@@ -211,9 +212,13 @@ describe('createCheckoutSession', () => {
   })
 })
 
-// Runs the callback against a stub transaction client.
+// Runs the callback against a stub transaction client. `ticket` is seeded
+// by default because every PAID path issues one — a test that cares asserts
+// on m.ticketCreate; a test that does not gets a working stub for free.
 function txRuns(tx: Record<string, unknown>) {
-  m.transaction.mockImplementation(async (fn: (t: unknown) => unknown) => fn(tx))
+  m.transaction.mockImplementation(async (fn: (t: unknown) => unknown) =>
+    fn({ ticket: { create: m.ticketCreate }, ...tx }),
+  )
 }
 
 describe('applyPaymentOutcome', () => {
@@ -248,15 +253,19 @@ describe('applyPaymentOutcome', () => {
           status: 'PENDING',
           booking: { id: 'b1', status: 'PENDING_PAYMENT' },
         }),
-        update: paymentUpdate,
+        updateMany: paymentUpdate,
       },
+      $queryRaw: vi.fn().mockResolvedValue([{ status: 'PENDING_PAYMENT' }]),
       booking: { update: bookingUpdate },
     })
 
     await applyPaymentOutcome({ eventId: 'evt_2', providerRef: 'ref_1', outcome: 'failed' })
 
     expect(paymentUpdate).toHaveBeenCalledWith(
-      expect.objectContaining({ data: expect.objectContaining({ status: 'FAILED' }) }),
+      expect.objectContaining({
+        where: expect.objectContaining({ id: 'p1', status: 'PENDING' }),
+        data: expect.objectContaining({ status: 'FAILED' }),
+      }),
     )
     expect(bookingUpdate).not.toHaveBeenCalled()
   })
@@ -276,8 +285,9 @@ describe('applyPaymentOutcome', () => {
           status: 'SUCCEEDED',
           booking: { id: 'b1', status: 'PAID' },
         }),
-        update: paymentUpdate,
+        updateMany: paymentUpdate,
       },
+      $queryRaw: vi.fn().mockResolvedValue([{ status: 'PAID' }]),
       booking: { update: bookingUpdate },
     })
 
@@ -286,6 +296,52 @@ describe('applyPaymentOutcome', () => {
     expect(paymentUpdate).not.toHaveBeenCalled()
     expect(bookingUpdate).not.toHaveBeenCalled()
     expect(result.bookingStatus).toBe('PAID')
+  })
+
+  // The race Finding 4 fixed: payment.status above (the findUnique result)
+  // is read BEFORE the booking row lock, so it can be stale by the time this
+  // branch writes. A concurrent 'succeeded' delivery for the same
+  // providerRef can move the real row PENDING -> SUCCEEDED in that window
+  // while this call's stale local read still says PENDING. Without the
+  // compare-and-swap (status: 'PENDING' in the updateMany where), the old
+  // unconditioned update() would stomp FAILED over the row a concurrent
+  // success just won — Payment.FAILED sitting next to Booking.PAID, which
+  // the comment on this branch says must never happen. This test simulates
+  // exactly that: the stale local read says PENDING, but the DB (mocked)
+  // reports the CAS matched zero rows because the real row has already
+  // moved on.
+  it('does not overwrite a payment a concurrent success already moved past PENDING', async () => {
+    const bookingUpdate = vi.fn()
+    const paymentUpdateMany = vi.fn().mockResolvedValue({ count: 0 })
+    txRuns({
+      webhookEvent: { create: vi.fn().mockResolvedValue({}) },
+      payment: {
+        findUnique: vi.fn().mockResolvedValue({
+          id: 'p1',
+          bookingId: 'b1',
+          status: 'PENDING', // stale: a concurrent success already won underneath this
+          booking: { id: 'b1', status: 'PENDING_PAYMENT' },
+        }),
+        updateMany: paymentUpdateMany,
+      },
+      $queryRaw: vi.fn().mockResolvedValue([{ status: 'PENDING_PAYMENT' }]),
+      booking: { update: bookingUpdate },
+    })
+
+    const result = await applyPaymentOutcome({
+      eventId: 'evt_failed_race',
+      providerRef: 'ref_1',
+      outcome: 'failed',
+    })
+
+    // The CAS was attempted (the stale read said PENDING)...
+    expect(paymentUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: expect.objectContaining({ id: 'p1', status: 'PENDING' }) }),
+    )
+    // ...but lost (count: 0), so nothing else may happen: no booking write,
+    // and the caller still sees the real, un-downgraded booking status.
+    expect(bookingUpdate).not.toHaveBeenCalled()
+    expect(result.bookingStatus).toBe('PENDING_PAYMENT')
   })
 
   it('marks a PENDING_PAYMENT booking PAID on success', async () => {
@@ -302,6 +358,7 @@ describe('applyPaymentOutcome', () => {
         update: vi.fn(),
         updateMany: vi.fn().mockResolvedValue({ count: 1 }),
       },
+      $queryRaw: vi.fn().mockResolvedValue([{ status: 'PENDING_PAYMENT' }]),
       booking: { update: vi.fn(), updateMany: bookingUpdateMany },
     })
 
@@ -314,6 +371,47 @@ describe('applyPaymentOutcome', () => {
       }),
     )
     expect(result.bookingStatus).toBe('PAID')
+    // A genuine first move into PAID — the flag the webhook route trusts to
+    // decide whether to send the confirmation email.
+    expect(result.transitioned).toBe(true)
+  })
+
+  // Regression test for the production bug a reviewer caught in Phase 4
+  // Task 7: two distinct eventIds racing on one providerRef can both read
+  // payment.booking.status as PENDING_PAYMENT before either commits. The
+  // fix locks the Booking row (SELECT ... FOR UPDATE) right after the
+  // payment lookup and branches on THAT read instead. This test gives the
+  // two values conflicting on purpose — stale nested value says
+  // PENDING_PAYMENT, the locked read says PAID — to prove the code follows
+  // the locked value. Without the fix (branching on payment.booking.status
+  // instead), this attempts the PENDING_PAYMENT CAS and issues a second
+  // ticket instead of taking the already-PAID no-op return.
+  it('branches on the row-locked booking status, not the stale nested payment.booking.status', async () => {
+    const bookingUpdateMany = vi.fn().mockResolvedValue({ count: 1 })
+    const queryRaw = vi.fn().mockResolvedValue([{ status: 'PAID' }])
+    txRuns({
+      webhookEvent: { create: vi.fn().mockResolvedValue({}) },
+      payment: {
+        findUnique: vi.fn().mockResolvedValue({
+          id: 'p1',
+          bookingId: 'b1',
+          status: 'SUCCEEDED',
+          booking: { id: 'b1', status: 'PENDING_PAYMENT', seats: [] },
+        }),
+        update: vi.fn(),
+        updateMany: vi.fn(),
+      },
+      $queryRaw: queryRaw,
+      booking: { update: vi.fn(), updateMany: bookingUpdateMany },
+    })
+
+    const result = await applyPaymentOutcome({ eventId: 'evt_lock', providerRef: 'ref_1', outcome: 'succeeded' })
+
+    expect(queryRaw).toHaveBeenCalled()
+    expect(bookingUpdateMany).not.toHaveBeenCalled()
+    expect(m.ticketCreate).not.toHaveBeenCalled()
+    expect(result).toEqual({ applied: true, bookingStatus: 'PAID', bookingId: 'b1' })
+    expect(result.transitioned).toBeFalsy()
   })
 
   // The compare-and-swap that closes CRITICAL 1: expireStaleBookings() can
@@ -327,10 +425,14 @@ describe('applyPaymentOutcome', () => {
     const bookingUpdate = vi.fn()
     const bookingUpdateMany = vi.fn().mockResolvedValue({ count: 0 })
     const seatUpdateMany = vi.fn()
-    const queryRaw = vi.fn().mockResolvedValue([
-      { id: 's1', status: 'AVAILABLE' },
-      { id: 's2', status: 'AVAILABLE' },
-    ])
+    const queryRaw = vi.fn()
+      // First call: the new booking-row lock this fix adds. Second: the
+      // pre-existing seat lock in the recover block.
+      .mockResolvedValueOnce([{ status: 'PENDING_PAYMENT' }])
+      .mockResolvedValueOnce([
+        { id: 's1', status: 'AVAILABLE' },
+        { id: 's2', status: 'AVAILABLE' },
+      ])
     txRuns({
       webhookEvent: { create: vi.fn().mockResolvedValue({}) },
       payment: {
@@ -361,16 +463,20 @@ describe('applyPaymentOutcome', () => {
       expect.objectContaining({ data: expect.objectContaining({ status: 'PAID' }) }),
     )
     expect(result.bookingStatus).toBe('PAID')
+    // Recover-when-free is also a genuine first move into PAID.
+    expect(result.transitioned).toBe(true)
   })
 
   it('falls through to the seat re-check when the expiry sweep wins the race, and flags REFUND_REQUIRED when a seat is gone', async () => {
     const bookingUpdate = vi.fn()
     const bookingUpdateMany = vi.fn().mockResolvedValue({ count: 0 })
     const seatUpdateMany = vi.fn()
-    const queryRaw = vi.fn().mockResolvedValue([
-      { id: 's1', status: 'AVAILABLE' },
-      { id: 's2', status: 'BOOKED' },
-    ])
+    const queryRaw = vi.fn()
+      .mockResolvedValueOnce([{ status: 'PENDING_PAYMENT' }])
+      .mockResolvedValueOnce([
+        { id: 's1', status: 'AVAILABLE' },
+        { id: 's2', status: 'BOOKED' },
+      ])
     txRuns({
       webhookEvent: { create: vi.fn().mockResolvedValue({}) },
       payment: {
@@ -399,6 +505,8 @@ describe('applyPaymentOutcome', () => {
       expect.objectContaining({ data: expect.objectContaining({ status: 'REFUND_REQUIRED' }) }),
     )
     expect(result.bookingStatus).toBe('REFUND_REQUIRED')
+    // REFUND_REQUIRED must never look like a transition to PAID.
+    expect(result.transitioned).toBeFalsy()
   })
 
   // The compare-and-swap that closes IMPORTANT 2: a checkout retry's own CAS
@@ -420,6 +528,7 @@ describe('applyPaymentOutcome', () => {
         update: vi.fn(),
         updateMany: paymentUpdateMany,
       },
+      $queryRaw: vi.fn().mockResolvedValue([{ status: 'PENDING_PAYMENT' }]),
       booking: { update: bookingUpdate, updateMany: vi.fn() },
     })
 
@@ -457,16 +566,19 @@ describe('applyPaymentOutcome', () => {
         update: vi.fn(),
         updateMany: vi.fn().mockResolvedValue({ count: 1 }),
       },
-      $queryRaw: vi.fn().mockResolvedValue([
-        { id: 's1', status: 'AVAILABLE' },
-        { id: 's2', status: 'AVAILABLE' },
-      ]),
+      $queryRaw: vi.fn()
+        .mockResolvedValueOnce([{ status: 'EXPIRED' }])
+        .mockResolvedValueOnce([
+          { id: 's1', status: 'AVAILABLE' },
+          { id: 's2', status: 'AVAILABLE' },
+        ]),
       seat: { updateMany: seatUpdateMany },
       booking: { update: bookingUpdate },
     })
 
-    await applyPaymentOutcome({ eventId: 'evt_4', providerRef: 'ref_1', outcome: 'succeeded' })
+    const result = await applyPaymentOutcome({ eventId: 'evt_4', providerRef: 'ref_1', outcome: 'succeeded' })
 
+    expect(result.transitioned).toBe(true)
     expect(seatUpdateMany).toHaveBeenCalledWith(
       expect.objectContaining({ data: { status: 'BOOKED' } }),
     )
@@ -494,10 +606,12 @@ describe('applyPaymentOutcome', () => {
         update: vi.fn(),
         updateMany: vi.fn().mockResolvedValue({ count: 1 }),
       },
-      $queryRaw: vi.fn().mockResolvedValue([
-        { id: 's1', status: 'AVAILABLE' },
-        { id: 's2', status: 'BOOKED' },
-      ]),
+      $queryRaw: vi.fn()
+        .mockResolvedValueOnce([{ status: 'EXPIRED' }])
+        .mockResolvedValueOnce([
+          { id: 's1', status: 'AVAILABLE' },
+          { id: 's2', status: 'BOOKED' },
+        ]),
       seat: { updateMany: seatUpdateMany },
       booking: { update: bookingUpdate },
     })
@@ -510,7 +624,16 @@ describe('applyPaymentOutcome', () => {
     )
   })
 
-  it('does nothing when the booking is already PAID', async () => {
+  // Redelivery of an already-applied success under a *different* eventId
+  // (evt_6 here, vs. whatever eventId first paid this booking) is normal
+  // at-least-once delivery — the WebhookEvent unique constraint only dedupes
+  // an identical eventId, so this path is reached, not short-circuited
+  // earlier. It must return the same { applied: true, bookingStatus: 'PAID' }
+  // shape a fresh transition returns (nothing here breaks the booking), but
+  // `transitioned` must stay falsy — that is the one signal that stops the
+  // webhook route from re-sending the confirmation email on every
+  // redelivery a payment provider makes.
+  it('does nothing when the booking is already PAID, and does not report a transition', async () => {
     const bookingUpdate = vi.fn()
     txRuns({
       webhookEvent: { create: vi.fn().mockResolvedValue({}) },
@@ -523,12 +646,15 @@ describe('applyPaymentOutcome', () => {
         update: vi.fn(),
         updateMany: vi.fn().mockResolvedValue({ count: 1 }),
       },
+      $queryRaw: vi.fn().mockResolvedValue([{ status: 'PAID' }]),
       booking: { update: bookingUpdate },
     })
 
-    await applyPaymentOutcome({ eventId: 'evt_6', providerRef: 'ref_1', outcome: 'succeeded' })
+    const result = await applyPaymentOutcome({ eventId: 'evt_6', providerRef: 'ref_1', outcome: 'succeeded' })
 
     expect(bookingUpdate).not.toHaveBeenCalled()
+    expect(result).toEqual({ applied: true, bookingStatus: 'PAID', bookingId: 'b1' })
+    expect(result.transitioned).toBeFalsy()
   })
 
   // REFUND_REQUIRED is terminal: a duplicate success delivered after the
@@ -537,7 +663,10 @@ describe('applyPaymentOutcome', () => {
   it('leaves a REFUND_REQUIRED booking untouched on a duplicate success', async () => {
     const bookingUpdate = vi.fn()
     const seatUpdateMany = vi.fn()
-    const queryRaw = vi.fn()
+    // Called once now, for the booking-row lock this fix adds — but never a
+    // second time for the seat lock, since REFUND_REQUIRED short-circuits
+    // before the recover block.
+    const queryRaw = vi.fn().mockResolvedValue([{ status: 'REFUND_REQUIRED' }])
     txRuns({
       webhookEvent: { create: vi.fn().mockResolvedValue({}) },
       payment: {
@@ -556,7 +685,7 @@ describe('applyPaymentOutcome', () => {
 
     const result = await applyPaymentOutcome({ eventId: 'evt_7', providerRef: 'ref_1', outcome: 'succeeded' })
 
-    expect(queryRaw).not.toHaveBeenCalled()
+    expect(queryRaw).toHaveBeenCalledTimes(1)
     expect(seatUpdateMany).not.toHaveBeenCalled()
     expect(bookingUpdate).not.toHaveBeenCalled()
     expect(result.bookingStatus).toBe('REFUND_REQUIRED')
@@ -582,7 +711,9 @@ describe('applyPaymentOutcome', () => {
         update: vi.fn(),
         updateMany: vi.fn().mockResolvedValue({ count: 1 }),
       },
-      $queryRaw: vi.fn().mockResolvedValue([{ id: 's1', status: 'AVAILABLE' }]),
+      $queryRaw: vi.fn()
+        .mockResolvedValueOnce([{ status: 'EXPIRED' }])
+        .mockResolvedValueOnce([{ id: 's1', status: 'AVAILABLE' }]),
       seat: { updateMany: seatUpdateMany },
       booking: { update: bookingUpdate },
     })
@@ -593,5 +724,177 @@ describe('applyPaymentOutcome', () => {
     expect(bookingUpdate).toHaveBeenCalledWith(
       expect.objectContaining({ data: expect.objectContaining({ status: 'REFUND_REQUIRED' }) }),
     )
+  })
+})
+
+describe('applyPaymentOutcome — ticket issuance', () => {
+  it('issues a ticket when a PENDING_PAYMENT booking becomes PAID', async () => {
+    txRuns({
+      webhookEvent: { create: vi.fn().mockResolvedValue({}) },
+      payment: {
+        findUnique: vi.fn().mockResolvedValue({
+          id: 'p1',
+          bookingId: 'b1',
+          status: 'PENDING',
+          booking: { id: 'b1', status: 'PENDING_PAYMENT' },
+        }),
+        update: vi.fn(),
+        updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+      },
+      $queryRaw: vi.fn().mockResolvedValue([{ status: 'PENDING_PAYMENT' }]),
+      booking: { update: vi.fn(), updateMany: vi.fn().mockResolvedValue({ count: 1 }) },
+    })
+
+    const result = await applyPaymentOutcome({
+      eventId: 'evt_t1',
+      providerRef: 'ref_1',
+      outcome: 'succeeded',
+    })
+
+    expect(result.bookingStatus).toBe('PAID')
+    expect(m.ticketCreate).toHaveBeenCalledTimes(1)
+    expect(m.ticketCreate.mock.calls[0][0].data.bookingId).toBe('b1')
+  })
+
+  // The recover path: the hold lapsed, the sweep won the CAS, but the seats
+  // are still free. This booking becomes PAID too, so it needs a ticket by
+  // the same rule — a second code path is exactly where one gets forgotten.
+  it('issues a ticket on the recover path when the seats are still free', async () => {
+    txRuns({
+      webhookEvent: { create: vi.fn().mockResolvedValue({}) },
+      payment: {
+        findUnique: vi.fn().mockResolvedValue({
+          id: 'p1',
+          bookingId: 'b1',
+          status: 'PENDING',
+          booking: {
+            id: 'b1',
+            status: 'PENDING_PAYMENT',
+            seats: [{ seatId: 's1' }, { seatId: 's2' }],
+          },
+        }),
+        update: vi.fn(),
+        updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+      },
+      $queryRaw: vi.fn()
+        .mockResolvedValueOnce([{ status: 'PENDING_PAYMENT' }])
+        .mockResolvedValueOnce([
+          { id: 's1', status: 'AVAILABLE' },
+          { id: 's2', status: 'AVAILABLE' },
+        ]),
+      seat: { updateMany: vi.fn() },
+      booking: { update: vi.fn(), updateMany: vi.fn().mockResolvedValue({ count: 0 }) },
+    })
+
+    const result = await applyPaymentOutcome({
+      eventId: 'evt_t2',
+      providerRef: 'ref_1',
+      outcome: 'succeeded',
+    })
+
+    expect(result.bookingStatus).toBe('PAID')
+    expect(m.ticketCreate).toHaveBeenCalledTimes(1)
+    expect(m.ticketCreate.mock.calls[0][0].data.bookingId).toBe('b1')
+  })
+
+  it('issues no ticket when the outcome is failed', async () => {
+    txRuns({
+      webhookEvent: { create: vi.fn().mockResolvedValue({}) },
+      payment: {
+        findUnique: vi.fn().mockResolvedValue({
+          id: 'p1',
+          bookingId: 'b1',
+          status: 'PENDING',
+          booking: { id: 'b1', status: 'PENDING_PAYMENT' },
+        }),
+        updateMany: vi.fn(),
+      },
+      $queryRaw: vi.fn().mockResolvedValue([{ status: 'PENDING_PAYMENT' }]),
+      booking: { update: vi.fn() },
+    })
+
+    await applyPaymentOutcome({ eventId: 'evt_t3', providerRef: 'ref_1', outcome: 'failed' })
+
+    expect(m.ticketCreate).not.toHaveBeenCalled()
+  })
+
+  // Money already owed back. A ticket here would hand out seats that
+  // someone else is holding.
+  it('issues no ticket for a booking already flagged REFUND_REQUIRED', async () => {
+    txRuns({
+      webhookEvent: { create: vi.fn().mockResolvedValue({}) },
+      payment: {
+        findUnique: vi.fn().mockResolvedValue({
+          id: 'p1',
+          bookingId: 'b1',
+          status: 'PENDING',
+          booking: { id: 'b1', status: 'REFUND_REQUIRED' },
+        }),
+        update: vi.fn(),
+        updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+      },
+      $queryRaw: vi.fn().mockResolvedValue([{ status: 'REFUND_REQUIRED' }]),
+      booking: { update: vi.fn(), updateMany: vi.fn() },
+    })
+
+    const result = await applyPaymentOutcome({
+      eventId: 'evt_t4',
+      providerRef: 'ref_1',
+      outcome: 'succeeded',
+    })
+
+    expect(result.bookingStatus).toBe('REFUND_REQUIRED')
+    expect(m.ticketCreate).not.toHaveBeenCalled()
+  })
+
+  it('issues no ticket when a seat was taken and a refund becomes owed', async () => {
+    txRuns({
+      webhookEvent: { create: vi.fn().mockResolvedValue({}) },
+      payment: {
+        findUnique: vi.fn().mockResolvedValue({
+          id: 'p1',
+          bookingId: 'b1',
+          status: 'PENDING',
+          booking: {
+            id: 'b1',
+            status: 'PENDING_PAYMENT',
+            seats: [{ seatId: 's1' }, { seatId: 's2' }],
+          },
+        }),
+        update: vi.fn(),
+        updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+      },
+      $queryRaw: vi.fn()
+        .mockResolvedValueOnce([{ status: 'PENDING_PAYMENT' }])
+        .mockResolvedValueOnce([
+          { id: 's1', status: 'AVAILABLE' },
+          { id: 's2', status: 'BOOKED' },
+        ]),
+      seat: { updateMany: vi.fn() },
+      booking: { update: vi.fn(), updateMany: vi.fn().mockResolvedValue({ count: 0 }) },
+    })
+
+    const result = await applyPaymentOutcome({
+      eventId: 'evt_t5',
+      providerRef: 'ref_1',
+      outcome: 'succeeded',
+    })
+
+    expect(result.bookingStatus).toBe('REFUND_REQUIRED')
+    expect(m.ticketCreate).not.toHaveBeenCalled()
+  })
+
+  it('issues no ticket when the event is a duplicate delivery', async () => {
+    txRuns({
+      webhookEvent: {
+        create: vi.fn().mockRejectedValue(Object.assign(new Error('dup'), { code: 'P2002' })),
+      },
+      booking: { update: vi.fn() },
+    })
+
+    const result = await applyPaymentOutcome({ eventId: 'evt_t6', providerRef: 'ref_1', outcome: 'succeeded' })
+
+    expect(result.applied).toBe(false)
+    expect(m.ticketCreate).not.toHaveBeenCalled()
   })
 })

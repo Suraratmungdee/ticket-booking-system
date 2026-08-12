@@ -18,10 +18,11 @@ export const COOKIE_SECURE = process.env.NODE_ENV === 'production'
 // production this fallback must never be reachable — the check below throws
 // at startup instead, so a misconfigured deploy fails loudly rather than
 // silently signing forgeable tokens.
+const DEV_JWT_SECRET_FALLBACK = 'dev-secret-change-me'
 if (process.env.NODE_ENV === 'production' && !process.env.JWT_SECRET) {
   throw new Error('JWT_SECRET must be set when NODE_ENV=production')
 }
-export const JWT_SECRET = process.env.JWT_SECRET ?? 'dev-secret-change-me'
+export const JWT_SECRET = process.env.JWT_SECRET ?? DEV_JWT_SECRET_FALLBACK
 
 export const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN ?? 'http://localhost:3000'
 
@@ -82,6 +83,23 @@ export const PAYMENT_WEBHOOK_SECRET =
 // Where the mock provider posts its webhook back to. Only used by the mock.
 export const API_BASE_URL = process.env.API_BASE_URL ?? 'http://localhost:4000'
 
+// Signs the QR payload on a ticket. Deliberately NOT the same value as
+// PAYMENT_WEBHOOK_SECRET: those are two different trust boundaries, and
+// whoever gets one leaked must not be able to forge the other.
+//
+// LIMITATION: falls back to a dev-only value committed in this repo (so it
+// is not a secret) to keep local boot working without a .env. The guard in
+// assertPaymentProviderIsSafe below makes that fallback unreachable in
+// production.
+const DEV_TICKET_SECRET_FALLBACK = 'dev-ticket-secret-change-me'
+export const TICKET_SIGNING_SECRET =
+  process.env.TICKET_SIGNING_SECRET ?? DEV_TICKET_SECRET_FALLBACK
+
+// Confirmation email. Unset is a supported state: lib/email.ts logs the
+// message instead of sending it, so local dev needs no mail account.
+export const RESEND_API_KEY = process.env.RESEND_API_KEY
+export const EMAIL_FROM = process.env.EMAIL_FROM ?? 'tickets@example.com'
+
 // The mock provider can mark any booking PAID with no money involved. Shipped
 // to production it is a free-tickets endpoint for anyone who finds it, so a
 // production boot with the mock enabled must fail loudly rather than quietly
@@ -96,6 +114,20 @@ export function assertPaymentProviderIsSafe(): void {
   if (process.env.NODE_ENV === 'production' && !process.env.PAYMENT_WEBHOOK_SECRET) {
     throw new Error('PAYMENT_WEBHOOK_SECRET must be set when NODE_ENV=production')
   }
+  // .env.example commits the exact same string as the code's dev fallback.
+  // The "must be set" check right above JWT_SECRET's export only verifies
+  // the variable is *set* — a deploy that copied .env.example verbatim
+  // would pass it while booting with a publicly known JWT signing key,
+  // letting anyone forge a valid session cookie for any user. Reject that
+  // specific value outright in production.
+  if (
+    process.env.NODE_ENV === 'production' &&
+    process.env.JWT_SECRET === DEV_JWT_SECRET_FALLBACK
+  ) {
+    throw new Error(
+      'JWT_SECRET is still the committed .env.example placeholder — set a real secret before deploying to production.',
+    )
+  }
   // .env.example commits the same string as the code fallback above. The
   // check just above only verifies the variable is *set* — a deploy that
   // copied .env.example verbatim would pass it while boot with a publicly
@@ -107,6 +139,20 @@ export function assertPaymentProviderIsSafe(): void {
   ) {
     throw new Error(
       'PAYMENT_WEBHOOK_SECRET is still the committed .env.example placeholder — set a real secret before deploying to production.',
+    )
+  }
+  // Same failure Phase 3 had to be patched for: a deploy that copied
+  // .env.example verbatim would boot with a publicly known signing key,
+  // letting anyone mint a valid-looking ticket QR for free.
+  if (process.env.NODE_ENV === 'production' && !process.env.TICKET_SIGNING_SECRET) {
+    throw new Error('TICKET_SIGNING_SECRET must be set when NODE_ENV=production')
+  }
+  if (
+    process.env.NODE_ENV === 'production' &&
+    process.env.TICKET_SIGNING_SECRET === DEV_TICKET_SECRET_FALLBACK
+  ) {
+    throw new Error(
+      'TICKET_SIGNING_SECRET is still the committed .env.example placeholder — set a real secret before deploying to production.',
     )
   }
 }

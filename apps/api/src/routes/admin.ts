@@ -7,9 +7,14 @@ import {
   listAllEvents,
   createEvent,
   updateEvent,
+  createShowtime,
+  updateShowtime,
+  createSeatMap,
+  SeatMapTooLargeError,
 } from '../lib/admin.js'
 import { requireAuth, requireAdmin } from '../middleware/auth.js'
 import { logServerError } from '../lib/log.js'
+import { MAX_SEATS_PER_SEATMAP } from '../lib/config.js'
 
 const router = Router()
 
@@ -128,6 +133,101 @@ export const updateEventHandler: RequestHandler = async (req, res) => {
   }
 }
 
+const showtimeCreateSchema = z
+  .object({
+    eventId: z.string().min(1),
+    startTime: z.iso.datetime(),
+    endTime: z.iso.datetime(),
+  })
+  .refine((v) => new Date(v.endTime) > new Date(v.startTime), {
+    message: 'endTime must be after startTime',
+  })
+
+export const createShowtimeHandler: RequestHandler = async (req, res) => {
+  const parsed = showtimeCreateSchema.safeParse(req.body)
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
+
+  const adminId = req.user?.id
+  if (!adminId) return res.status(401).json({ error: 'Unauthorized' })
+
+  try {
+    const showtime = await createShowtime(adminId, {
+      eventId: parsed.data.eventId,
+      startTime: new Date(parsed.data.startTime),
+      endTime: new Date(parsed.data.endTime),
+    })
+    return res.status(201).json({ showtime })
+  } catch (err) {
+    if (isPrismaCode(err, 'P2003')) return res.status(400).json({ error: 'Unknown eventId' })
+    logServerError('POST /admin/showtimes failed', err)
+    return res.status(500).json({ error: 'Internal server error' })
+  }
+}
+
+const showtimeUpdateSchema = z
+  .object({ startTime: z.iso.datetime().optional(), endTime: z.iso.datetime().optional() })
+  .refine((v) => v.startTime !== undefined || v.endTime !== undefined, {
+    message: 'At least one field must be provided',
+  })
+
+export const updateShowtimeHandler: RequestHandler = async (req, res) => {
+  const { id } = req.params
+  if (typeof id !== 'string') return res.status(400).json({ error: 'Invalid id' })
+
+  const parsed = showtimeUpdateSchema.safeParse(req.body)
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
+
+  const adminId = req.user?.id
+  if (!adminId) return res.status(401).json({ error: 'Unauthorized' })
+
+  try {
+    const showtime = await updateShowtime(adminId, id, {
+      ...(parsed.data.startTime ? { startTime: new Date(parsed.data.startTime) } : {}),
+      ...(parsed.data.endTime ? { endTime: new Date(parsed.data.endTime) } : {}),
+    })
+    return res.json({ showtime })
+  } catch (err) {
+    if (isPrismaCode(err, 'P2025')) return res.status(404).json({ error: 'Showtime not found' })
+    logServerError('PATCH /admin/showtimes/:id failed', err)
+    return res.status(500).json({ error: 'Internal server error' })
+  }
+}
+
+const seatMapCreateSchema = z.object({
+  showtimeId: z.string().min(1),
+  zoneName: z.string().min(1).max(100),
+  // Whole baht. int() rejects 149.5, which would silently become a Float
+  // price and break every total in the system.
+  price: z.number().int().nonnegative(),
+  rows: z.array(z.string().min(1).max(4)).min(1),
+  seatsPerRow: z.number().int().positive(),
+})
+
+export const createSeatMapHandler: RequestHandler = async (req, res) => {
+  const parsed = seatMapCreateSchema.safeParse(req.body)
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
+
+  const adminId = req.user?.id
+  if (!adminId) return res.status(401).json({ error: 'Unauthorized' })
+
+  try {
+    return res.status(201).json({ seatMap: await createSeatMap(adminId, parsed.data) })
+  } catch (err) {
+    if (err instanceof SeatMapTooLargeError) {
+      return res
+        .status(400)
+        .json({ error: `A seat map may contain at most ${MAX_SEATS_PER_SEATMAP} seats` })
+    }
+    if (isPrismaCode(err, 'P2003')) return res.status(400).json({ error: 'Unknown showtimeId' })
+    // A duplicate (seatMapId, row, number) cannot happen here — the seats are
+    // generated, not supplied — so P2002 stays a 500 rather than being
+    // swallowed. Never catch a constraint error and continue inside a
+    // transaction: Postgres has already aborted it.
+    logServerError('POST /admin/seatmaps failed', err)
+    return res.status(500).json({ error: 'Internal server error' })
+  }
+}
+
 // requireAuth then requireAdmin on every route, with no exceptions. A route
 // added below without both is an unguarded write to the whole catalog.
 router.get('/venues', requireAuth, requireAdmin, listVenuesHandler)
@@ -136,5 +236,8 @@ router.patch('/venues/:id', requireAuth, requireAdmin, updateVenueHandler)
 router.get('/events', requireAuth, requireAdmin, listEventsHandler)
 router.post('/events', requireAuth, requireAdmin, createEventHandler)
 router.patch('/events/:id', requireAuth, requireAdmin, updateEventHandler)
+router.post('/showtimes', requireAuth, requireAdmin, createShowtimeHandler)
+router.patch('/showtimes/:id', requireAuth, requireAdmin, updateShowtimeHandler)
+router.post('/seatmaps', requireAuth, requireAdmin, createSeatMapHandler)
 
 export default router

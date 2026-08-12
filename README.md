@@ -41,6 +41,11 @@ npm install
 cp apps/api/.env.example apps/api/.env
 cp apps/web/.env.example apps/web/.env.local
 
+# 2.1 (ทางเลือก) อยากได้บัญชี admin ไว้ทดสอบหน้า /admin ด้วย
+#     เปิด apps/api/.env แล้วใส่ค่าให้ SEED_ADMIN_EMAIL และ SEED_ADMIN_PASSWORD
+#     ก่อนรันขั้นตอนที่ 4 — ถ้าเว้นว่างไว้ ระบบจะทำงานได้ปกติแค่ไม่มี admin
+#     account ให้ล็อกอิน
+
 # 3. เปิดฐานข้อมูลและ Redis (npm test ต้องมีทั้งคู่ — integration test ต่อจริง)
 docker compose up -d
 

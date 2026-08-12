@@ -6,9 +6,11 @@ import {
   InvalidCredentialsError,
   EmailAlreadyRegisteredError,
 } from '../lib/auth.js'
-import { JWT_COOKIE_NAME, JWT_MAX_AGE_MS, COOKIE_SAME_SITE, COOKIE_SECURE } from '../lib/config.js'
+import { JWT_COOKIE_NAME, JWT_MAX_AGE_MS, AUTH_COOKIE_OPTIONS } from '../lib/config.js'
 import { logServerError } from '../lib/log.js'
 import { isRateLimited, recordLoginFailure, refundAttempt } from '../lib/rate-limit.js'
+import { requireAuth } from '../middleware/auth.js'
+import { prisma } from '../lib/prisma.js'
 
 const router = Router()
 
@@ -81,12 +83,7 @@ export const loginHandler: RequestHandler = async (req, res) => {
   try {
     const { token, user } = await loginUser(parsed.data)
     refundAttempt(key)
-    res.cookie(JWT_COOKIE_NAME, token, {
-      httpOnly: true,
-      secure: COOKIE_SECURE,
-      sameSite: COOKIE_SAME_SITE,
-      maxAge: JWT_MAX_AGE_MS,
-    })
+    res.cookie(JWT_COOKIE_NAME, token, { ...AUTH_COOKIE_OPTIONS, maxAge: JWT_MAX_AGE_MS })
     return res.json({ user })
   } catch (err) {
     if (err instanceof InvalidCredentialsError) {
@@ -102,5 +99,39 @@ export const loginHandler: RequestHandler = async (req, res) => {
 }
 
 router.post('/login', loginHandler)
+
+// Who is this cookie? The frontend cannot read the JWT itself — it is
+// httpOnly by design — so without this it has no way to render "signed in
+// as X", hide the login button, or know whether to offer the admin link.
+//
+// role comes from the database, not from req.user.role (which came from the
+// JWT), for the same reason requireAdmin re-reads it: a token lives
+// JWT_MAX_AGE_MS, so a user whose admin rights were revoked would keep
+// being shown the admin nav for the rest of that window.
+export const meHandler: RequestHandler = async (req, res) => {
+  const userId = req.user?.id
+  if (!userId) return res.status(401).json({ error: 'Unauthorized' })
+
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { id: true, email: true, name: true, role: true },
+  })
+  // Valid signature, but the account is gone — the cookie is worthless.
+  if (!user) return res.status(401).json({ error: 'Unauthorized' })
+
+  return res.json({ user })
+}
+
+router.get('/me', requireAuth, meHandler)
+
+// No requireAuth: clearing a cookie that isn't there is a no-op, and
+// answering 401 would leave someone holding an expired token with no way to
+// get rid of it.
+export const logoutHandler: RequestHandler = (_req, res) => {
+  res.clearCookie(JWT_COOKIE_NAME, AUTH_COOKIE_OPTIONS)
+  return res.status(204).end()
+}
+
+router.post('/logout', logoutHandler)
 
 export default router

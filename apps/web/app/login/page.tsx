@@ -34,7 +34,11 @@ export default function LoginPage() {
       return
     }
 
-    router.push('/events')
+    // Land people where they actually work. The role comes from the login
+    // response, which is only a display hint — every /admin route is still
+    // guarded server-side, so a forged role here buys nothing but a 404.
+    const data = await res.json().catch(() => ({}))
+    router.push(data.user?.role === 'ADMIN' ? '/admin' : '/events')
   }
 
   return (

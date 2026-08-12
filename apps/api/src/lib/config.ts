@@ -13,6 +13,18 @@ export const JWT_COOKIE_NAME = 'token'
 export const COOKIE_SAME_SITE = process.env.NODE_ENV === 'production' ? 'none' : 'lax'
 export const COOKIE_SECURE = process.env.NODE_ENV === 'production'
 
+// The attributes that must be identical going in and coming out: a browser
+// only drops a cookie on clearCookie when name, path, secure and sameSite
+// all match what set it. Let one field drift between the login and logout
+// handlers and logout returns 204 while the session cookie stays put — a
+// failure that looks exactly like success. maxAge is deliberately absent:
+// clearCookie sets its own expiry, and login adds the age it wants.
+export const AUTH_COOKIE_OPTIONS = {
+  httpOnly: true,
+  secure: COOKIE_SECURE,
+  sameSite: COOKIE_SAME_SITE,
+} as const
+
 // LIMITATION: falls back to a dev-only secret (committed in this repo, so it
 // is not a secret) so local boot never crashes without a .env file. In
 // production this fallback must never be reachable — the check below throws

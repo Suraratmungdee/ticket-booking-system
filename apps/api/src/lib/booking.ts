@@ -33,12 +33,30 @@ export async function createBooking(input: {
     return await prisma.$transaction(async (tx) => {
       // Lock the Showtime row FIRST, in its own statement, before touching
       // any Seat row. This closes the race with updateShowtime (which takes
-      // the identical `FOR UPDATE` on this row before writing startTime —
-      // see admin.ts): once we hold this lock, updateShowtime cannot commit
-      // a change to startTime/status until we commit or roll back, so the
-      // showtimeStatus/showtimeStartTime read a few lines below via the
-      // seat join is guaranteed not to go stale between that read and our
+      // an exclusive `FOR UPDATE` on this row before writing startTime — see
+      // admin.ts): once we hold this lock, updateShowtime cannot commit a
+      // change to startTime/status until we commit or roll back, so the
+      // showtimeStatus/showtimeStartTime read a few lines below via the seat
+      // join is guaranteed not to go stale between that read and our
       // decision.
+      //
+      // FOR SHARE, not FOR UPDATE — deliberately asymmetric with
+      // updateShowtime. This transaction only needs to stop the row being
+      // *written*; it never writes the row itself, so it only needs to
+      // exclude writers, not other readers. FOR SHARE conflicts with
+      // updateShowtime's FOR UPDATE (and with FOR NO KEY UPDATE), so the
+      // writer still blocks and is still blocked exactly as before — the
+      // race stays closed. But FOR SHARE holders don't conflict with each
+      // other, so two bookings for the same showtime (the hot path — most
+      // contention is many customers on ONE popular showtime, picking
+      // different seats) no longer queue behind a single exclusive lock for
+      // the seat query, the seat updateMany, and the booking/BookingSeat
+      // inserts. FOR UPDATE here would turn per-seat contention into
+      // per-showtime serialisation and risk Prisma's 5s $transaction
+      // timeout under burst load. (FOR KEY SHARE would NOT work: it only
+      // conflicts with updates that change the key, and updateShowtime's
+      // UPDATE is a non-key update — FOR KEY SHARE would silently let two
+      // conflicting transactions both proceed.)
       //
       // Deliberately NOT folded into the seat query below as
       // `FOR UPDATE OF s, t` (as a first draft of this fix did). Postgres's
@@ -55,17 +73,17 @@ export async function createBooking(input: {
       // txn1 then tries to lock B and blocks on txn2 — a genuine deadlock,
       // not merely a theoretical one, since "two customers picking
       // different-but-overlapping seats for the same popular showtime" is
-      // this system's central case. A combined multi-relation FOR UPDATE
-      // cannot express "always lock the showtime before any seat, for every
-      // caller" — only two separate, ordered statements can, which is what
-      // this does. See task-1-report.md for the full deadlock analysis.
+      // this system's central case. A combined multi-relation FOR UPDATE/FOR
+      // SHARE cannot express "always lock the showtime before any seat, for
+      // every caller" — only two separate, ordered statements can, which is
+      // what this does. See task-1-report.md for the full deadlock analysis.
       //
       // The result is discarded on purpose: a bogus/mismatched showtimeId
       // just locks zero rows here, and the seat checks below (showtimeId
       // mismatch, or zero seats matched) already turn that into the same
       // SeatUnavailableError a real caller would hit.
       await tx.$queryRaw`
-        SELECT id FROM "Showtime" WHERE id = ${input.showtimeId} FOR UPDATE
+        SELECT id FROM "Showtime" WHERE id = ${input.showtimeId} FOR SHARE
       `
 
       // The authority. FOR UPDATE blocks any concurrent transaction asking for

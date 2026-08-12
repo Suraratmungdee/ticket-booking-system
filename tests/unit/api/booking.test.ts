@@ -255,7 +255,16 @@ describe('createBooking', () => {
 
     expect(calls).toHaveLength(2)
     expect(calls[0]).toContain('"Showtime"')
-    expect(calls[0]).toContain('FOR UPDATE')
+    // FOR SHARE, not FOR UPDATE: this lock only needs to exclude writers
+    // (updateShowtime), not other concurrent bookings on the same showtime.
+    // Pinning the exact clause, not just presence of a lock, so a
+    // well-meaning "tidy" back to FOR UPDATE — which would reintroduce
+    // per-showtime serialisation on the hottest path — fails this test.
+    // (Substring match is exact here: "FOR SHARE" is not a substring of
+    // "FOR KEY SHARE" or "FOR UPDATE", so either of those wrong strengths
+    // fails too.)
+    expect(calls[0]).toContain('FOR SHARE')
+    expect(calls[0]).not.toContain('FOR UPDATE')
     expect(calls[1]).toContain('"Seat"')
   })
 

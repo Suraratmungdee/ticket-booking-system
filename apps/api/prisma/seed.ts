@@ -1,4 +1,6 @@
+import bcrypt from 'bcrypt'
 import { prisma } from '../src/lib/prisma.js'
+import { BCRYPT_SALT_ROUNDS } from '../src/lib/config.js'
 
 // CLAUDE.md §5: deleting real booking/payment data is never an agent's call
 // to make alone. The deletes below are real and needed for idempotency (the
@@ -25,6 +27,11 @@ async function main() {
   assertSeedIsSafe()
 
   await prisma.bookingSeat.deleteMany()
+  // Ticket.bookingId and Payment.bookingId are both RESTRICT FKs — deleting
+  // bookings before either fails with an FK violation whenever a ticket or
+  // payment row exists (Ticket since Phase 4, Payment since Phase 3).
+  await prisma.ticket.deleteMany()
+  await prisma.payment.deleteMany()
   await prisma.booking.deleteMany()
   await prisma.seat.deleteMany()
   await prisma.seatMap.deleteMany()
@@ -110,6 +117,22 @@ async function main() {
     }
   }
   console.log(`Seeded ${showtimes.length} showtimes x ${ZONES.length} zones x ${ROWS.length * SEATS_PER_ROW} seats`)
+
+  // Both must be set explicitly. A default password on an admin account is a
+  // back door committed to git — skipping is the only safe fallback.
+  const adminEmail = process.env.SEED_ADMIN_EMAIL
+  const adminPassword = process.env.SEED_ADMIN_PASSWORD
+  if (adminEmail && adminPassword) {
+    const passwordHash = await bcrypt.hash(adminPassword, BCRYPT_SALT_ROUNDS)
+    await prisma.user.upsert({
+      where: { email: adminEmail },
+      update: { role: 'ADMIN', passwordHash },
+      create: { email: adminEmail, passwordHash, name: 'Admin', role: 'ADMIN' },
+    })
+    console.log(`Seeded admin ${adminEmail}`)
+  } else {
+    console.log('SEED_ADMIN_EMAIL / SEED_ADMIN_PASSWORD not set — skipped creating an admin')
+  }
 }
 
 main()

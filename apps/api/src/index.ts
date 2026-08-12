@@ -7,6 +7,7 @@ import showtimesRouter from './routes/showtimes.js'
 import bookingsRouter from './routes/bookings.js'
 import webhooksRouter from './routes/webhooks.js'
 import ticketsRouter, { meTicketsRouter } from './routes/tickets.js'
+import adminRouter from './routes/admin.js'
 import { FRONTEND_ORIGIN, TRUST_PROXY, PAYMENT_PROVIDER, assertPaymentProviderIsSafe } from './lib/config.js'
 
 assertPaymentProviderIsSafe()
@@ -38,6 +39,7 @@ app.use('/bookings', bookingsRouter)
 app.use('/webhooks', webhooksRouter)
 app.use('/tickets', ticketsRouter)
 app.use('/me', meTicketsRouter)
+app.use('/admin', adminRouter)
 
 // Mounted only for the mock provider. Not mounted-then-guarded: a route that
 // does not exist cannot be reached by a misconfiguration.

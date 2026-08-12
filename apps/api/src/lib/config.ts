@@ -57,6 +57,12 @@ export const SEAT_HOLD_TTL_SECONDS = 300
 // Cap on seats per booking, so one request cannot sweep a whole zone.
 export const MAX_SEATS_PER_BOOKING = 8
 
+// Cap on seats one POST /admin/seatmaps may generate. Chosen by a human on
+// 12 Aug 2026 as "enough for this project", not derived from a real hall's
+// capacity — a bigger zone means several requests, or moving this number.
+// The point of the cap is that one request cannot ask for a million rows.
+export const MAX_SEATS_PER_SEATMAP = 100
+
 export const REDIS_URL = process.env.REDIS_URL ?? 'redis://localhost:6379'
 
 // 'mock' runs a self-hosted fake provider so the payment flow can be

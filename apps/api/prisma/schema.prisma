@@ -18,13 +18,14 @@ enum ShowtimeStatus {
 }
 
 model User {
-  id           String    @id @default(cuid())
-  email        String    @unique
+  id           String          @id @default(cuid())
+  email        String          @unique
   passwordHash String
   name         String
-  role         Role      @default(USER)
-  createdAt    DateTime  @default(now())
+  role         Role            @default(USER)
+  createdAt    DateTime        @default(now())
   bookings     Booking[]
+  auditLogs    AdminAuditLog[]
 }
 
 model Venue {
@@ -156,4 +157,22 @@ model Ticket {
   // rotated, tickets already handed out must stay readable.
   qrCodePayload String
   issuedAt      DateTime @default(now())
+}
+
+// Who changed what, and when. Written inside the same transaction as the
+// change it describes — a log that can disagree with the data is worse than
+// no log, because it invites people to trust it.
+model AdminAuditLog {
+  id         String   @id @default(cuid())
+  adminId    String
+  admin      User     @relation(fields: [adminId], references: [id])
+  // '<resource>.<verb>', e.g. 'event.create'. Deliberately a String, not an
+  // enum: an enum would force a migration for every new action and give
+  // nothing back.
+  action     String
+  targetType String
+  targetId   String
+  createdAt  DateTime @default(now())
+
+  @@index([createdAt])
 }

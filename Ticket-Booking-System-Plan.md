@@ -8,17 +8,16 @@ Agent ที่เลือกใช้: **Claude Code** | Stack: Next.js 16 (fr
 
 ---
 
-## 3. Plugin / MCP / Tool เสริมที่แนะนำ
+## 3. Plugin / MCP / Tool เสริม
 
-| เครื่องมือ | เหตุผล |
+> **ปรับปรุง 13 ส.ค. 2569:** เช็คแล้ว `.claude/settings.json` และไม่มี `.mcp.json` ในโปรเจกต์ — **ไม่มี MCP server ตัวไหนถูกติดตั้งจริงตลอด 6 phase ที่ผ่านมา** งานทั้งหมดทำด้วย Claude Code's built-in tools (Bash/Read/Edit) ล้วนๆ บวก CLI ที่เป็น dependency ของโปรเจกต์อยู่แล้ว ไม่มีอะไรเพิ่มเติมนอกเหนือจากนี้
+
+| เครื่องมือ | ใช้ทำอะไรจริง |
 |---|---|
-| **Postgres MCP server** | ให้ agent query/ตรวจ schema จริงได้โดยตรงแทนการเดา field name จาก `schema.prisma` เฉยๆ ลดบั๊กจาก field ไม่ตรง |
-| **GitHub MCP** | ให้ agent เปิด PR, อ่าน CI status, comment ได้เอง แต่ **ห้ามให้สิทธิ์ merge อัตโนมัติ** (ดูข้อ 8) |
-| **Playwright MCP** | รัน e2e test จริงในเบราว์เซอร์สำหรับ flow ค้นหา→จอง→จ่าย→ได้ตั๋ว ซึ่งเป็น critical path ที่ test ด้วย unit test อย่างเดียวไม่พอ |
-| **Stripe CLI / Stripe MCP (ถ้ามี)** | ยิง webhook event จำลอง (`payment_intent.succeeded` ฯลฯ) ทดสอบ flow ออกตั๋วโดยไม่ต้องจ่ายเงินจริงทุกครั้ง |
-| **Sentry (หรือ log tool คล้ายกัน)** | ไม่ใช่ MCP แต่ควรติดตั้งตั้งแต่ phase แรกของ payment เพื่อจับ error ที่เกิดใน webhook/production ซึ่งเป็นจุดที่แก้ทีหลังยากที่สุด |
-
-จงใจไม่แนะนำ: message-queue MCP, Kubernetes/infra MCP, custom internal-tool MCP — โปรเจกต์ขนาดนี้ยังไม่ถึงจุดที่ต้องใช้ (YAGNI) เพิ่มทีหลังได้เมื่อ scale จริงบังคับ
+| `npx prisma` (migrate/generate) | สร้างและรัน migration ทุกตัวใน `apps/api/prisma/migrations/` |
+| `npx vitest` | รัน unit test (186 เคส) และ integration test (10 เคส) |
+| `curl` | ยิง API ตรงเพื่อยืนยันพฤติกรรมจริง (login/CORS/preflight) แทนการเดาจากโค้ดอย่างเดียว — ใช้ตอนไล่บั๊ก `/admin` |
+| `docker compose` | รัน Postgres + Redis dev ตาม `docker-compose.yml` |
 
 ---
 
@@ -62,29 +61,39 @@ API -> User: email + Frontend ดึงสถานะตั๋วผ่าน G
 
 ## 5. Database Schema
 
-ตารางหลัก (Prisma-style, ย่อ type):
+> **ปรับปรุงล่าสุด 13 ส.ค. 2569 ให้ตรงกับ `apps/api/prisma/schema.prisma` จริงหลัง Phase 6** — เวอร์ชันนี้แทนที่ draft ตอน Phase 0 ทั้งหมด อย่าอ้างอิงเวอร์ชันเก่าอีก ต้นฉบับที่เป็นความจริงเสมอคือไฟล์ `.prisma` ไม่ใช่เอกสารนี้
+
+ตารางหลัก (ย่อ type, ดู field ครบ + comment อธิบายเหตุผลแต่ละจุดใน `schema.prisma` ตัวจริง):
 
 ```
-User          (id, email, password_hash, name, role[USER|ADMIN], created_at)
+User          (id, email, passwordHash, name, role[USER|ADMIN], createdAt)
 Venue         (id, name, address)
-Event         (id, title, description, venue_id -> Venue)
-Showtime      (id, event_id -> Event, start_time, end_time, status)
-SeatMap       (id, showtime_id -> Showtime, zone_name, price)
-Seat          (id, seat_map_id -> SeatMap, row, number, status[AVAILABLE|HELD|BOOKED])
-Booking       (id, user_id -> User, showtime_id -> Showtime, status[PENDING_PAYMENT|PAID|EXPIRED|CANCELLED], total_price, created_at, expires_at)
-BookingSeat   (id, booking_id -> Booking, seat_id -> Seat)      -- join table จอง N ที่นั่งต่อ booking
-Payment       (id, booking_id -> Booking, provider, provider_ref, amount, status, paid_at)
-Ticket        (id, booking_id -> Booking, qr_code_payload, issued_at)
-AdminAuditLog (id, admin_id -> User, action, target_type, target_id, created_at)
+Event         (id, title, description, venueId -> Venue)
+Showtime      (id, eventId -> Event, startTime, endTime, status[SCHEDULED|CANCELLED])
+SeatMap       (id, showtimeId -> Showtime, zoneName, price)              -- unique(showtimeId, zoneName)
+Seat          (id, seatMapId -> SeatMap, row, number, status[AVAILABLE|BOOKED])   -- unique(seatMapId, row, number)
+Booking       (id, userId -> User, showtimeId -> Showtime,
+               status[PENDING_PAYMENT|PAID|EXPIRED|CANCELLED|REFUND_REQUIRED],
+               totalPrice, createdAt, expiresAt)                         -- index(status, expiresAt)
+BookingSeat   (id, bookingId -> Booking, seatId -> Seat)                 -- join table, unique(bookingId, seatId)
+Payment       (id, bookingId -> Booking [unique], provider, providerRef [unique], amount, status[PENDING|SUCCEEDED|FAILED], paidAt, createdAt)
+WebhookEvent  (id, eventId [unique], receivedAt)                         -- idempotency ledger, ไม่ผูกกับตารางไหน
+Ticket        (id, bookingId -> Booking [unique], qrCodePayload, issuedAt)
+AdminAuditLog (id, adminId -> User, action, targetType, targetId, createdAt)  -- index(createdAt)
 ```
 
 ความสัมพันธ์สำคัญ:
-- `Event 1—N Showtime`, `Showtime 1—N Seat` (ผ่าน SeatMap)
+- `Event 1—N Showtime`, `Showtime 1—N SeatMap 1—N Seat`
 - `Booking N—N Seat` ผ่าน `BookingSeat` (1 booking จองได้หลายที่นั่ง)
-- `Booking 1—1 Payment` (MVP: 1 booking จ่ายครั้งเดียวจบ), `Booking 1—1 Ticket`
-- `Seat.status` ต้อง sync กับ `Booking.status` เสมอผ่าน transaction เดียว ห้ามอัพเดตแยกกันคนละ query (เสี่ยง race condition ที่นั่งซ้อน)
+- `Booking 1—1 Payment`, `Booking 1—1 Ticket` — ทั้งคู่ `@unique` บน `bookingId` ไม่ใช่แค่ตั้งใจ MVP แต่เป็นตัวกันชนตัวจริง: webhook ที่มาซ้ำ (retry/at-least-once delivery) ต้องแพ้ constraint แทนที่จะสร้างซ้ำ (ดู comment ใน schema ที่ `Ticket`/`WebhookEvent`)
+- `Seat.status` ต้อง sync กับ `Booking.status` เสมอผ่าน transaction เดียว ห้ามอัพเดตแยกกันคนละ query
+- `AdminAuditLog` ต้องเขียนใน transaction เดียวกับ action ที่มันบันทึก — log ที่ไม่ตรงกับข้อมูลจริงอันตรายกว่าไม่มี log
 
-> **แก้ไขระหว่างทำ Phase 2:** `Seat.status` ตัด `HELD` ออก เหลือ `AVAILABLE | BOOKED` เท่านั้น เพราะ hold เป็นสถานะชั่วคราวอายุ 5 นาทีที่อยู่ใน Redis ที่เดียว การเก็บไว้ทั้ง 2 ที่จะสร้างแหล่งความจริงซ้อนกันที่ต้อง sync ตลอดเวลา และเมื่อ process ตายกลางทางจะเหลือแถวค้าง `HELD` ตลอดกาลโดยไม่มี TTL มาเก็บกวาด — รายละเอียดใน `docs/superpowers/specs/2026-08-10-phase2-seats-booking-design.md`
+**ต่างจาก draft เดิมตรงไหนบ้าง (และทำไม):**
+- **`Seat.status` ตัด `HELD` ออก** เหลือ `AVAILABLE | BOOKED` — hold เป็นสถานะชั่วคราวอายุ 5 นาที อยู่ใน Redis แหล่งเดียว เก็บซ้ำใน DB จะสร้างแหล่งความจริง 2 ที่ที่ต้อง sync กันตลอดเวลา และเมื่อ process ตายกลางทางจะเหลือแถว `HELD` ค้างตลอดกาลโดยไม่มี TTL มาเก็บกวาด (รายละเอียด: `docs/superpowers/specs/2026-08-10-phase2-seats-booking-design.md`)
+- **`Booking.status` เพิ่ม `REFUND_REQUIRED`** — เพิ่มตอน Phase 5 (admin refund) เป็นสถานะกลางระหว่าง "แอดมินกดคืนเงินแล้ว" กับ "เงินคืนจริงเสร็จ" (payment provider จริงเป็น async)
+- **เพิ่มตาราง `WebhookEvent`** — ป้องกัน Stripe/mock provider ยิง webhook ซ้ำแล้วออกตั๋วซ้ำ (Phase 3 checklist ข้อ "duplicate event ไม่สร้าง ticket ซ้ำ")
+- **เพิ่มตาราง `AdminAuditLog`** จริงตาม draft เดิม แต่ตอนนี้มี `@@index([createdAt])` และ `action` เป็น `String` อิสระ (ไม่ใช่ enum) ตั้งใจ — enum จะบังคับ migration ทุกครั้งที่เพิ่ม action ใหม่โดยไม่ได้อะไรกลับมา
 
 ---
 
@@ -193,7 +202,7 @@ Checklist:
 Checklist:
 - [ ] จองที่นั่งเดียวกันพร้อมกัน 2 คน → มีคนเดียวได้ที่นั่ง (ทดสอบ concurrency จริง ไม่ใช่แค่ทฤษฎี)
 - [ ] hold หมดเวลาแล้วที่นั่งกลับมาว่างอัตโนมัติ
-- [ ] มี e2e test (Playwright) ครอบ flow เลือกที่นั่ง→สร้าง booking
+- [ ] มี e2e test (Playwright) ครอบ flow เลือกที่นั่ง→สร้าง booking — ทำแล้ว 13 ส.ค. 2569 แต่ครอบ flow เต็มเส้น (ค้นหา→เลือกที่นั่ง→จ่ายเงิน→เห็นตั๋ว) ไม่ใช่แค่ถึงขั้นสร้าง booking เพราะรอทำตอน Phase 4 เสร็จแล้วมี flow ครบให้ทดสอบจริง — `tests/e2e/booking-flow.spec.ts`, สั่งด้วย `npm run test:e2e`
 
 ### Phase 3 — ชำระเงิน (2 วัน)
 งาน: integrate Stripe Checkout, webhook handler + signature verification, อัพเดตสถานะ booking/seat แบบ transaction

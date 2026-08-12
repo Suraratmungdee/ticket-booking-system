@@ -15,7 +15,14 @@ afterEach(async () => {
   // reference, and both are scoped to ids this test created — the local
   // Postgres is shared with every other worktree.
   await prisma.ticket.deleteMany({ where: { bookingId: fixture.bookingId } })
-  await prisma.webhookEvent.deleteMany({ where: { eventId: { startsWith: 'evt_tkt_' } } })
+  // Scoped by this run's own bookingId, not a bare 'evt_tkt_' prefix: a
+  // prefix match can delete a sibling worktree's rows mid-run (this
+  // Postgres is shared), and `evt_tkt_${Date.now()}` can collide across
+  // worktrees within the same millisecond. bookingId is a fresh cuid every
+  // run, so prefixing with it is enough to scope precisely to this fixture.
+  await prisma.webhookEvent.deleteMany({
+    where: { eventId: { startsWith: `evt_tkt_${fixture.bookingId}` } },
+  })
   await deleteFixture(fixture)
 })
 
@@ -26,7 +33,7 @@ afterAll(async () => {
 describe('ticket issuance', () => {
   it('issues exactly one ticket, in the same transaction as PAID', async () => {
     const result = await applyPaymentOutcome({
-      eventId: `evt_tkt_${Date.now()}_seq`,
+      eventId: `evt_tkt_${fixture.bookingId}_seq`,
       providerRef: fixture.providerRef,
       outcome: 'succeeded',
     })
@@ -47,16 +54,27 @@ describe('ticket issuance', () => {
   // eventIds mean the WebhookEvent guard does NOT short-circuit the second
   // delivery — so the Ticket.bookingId unique constraint is the only thing
   // left holding. Drop that index and this test must go red.
+  //
+  // This test used to be flaky: applyPaymentOutcome read payment.booking
+  // .status once and trusted it for the rest of the transaction, so the CAS
+  // loser could fall into the recover block on a stale PENDING_PAYMENT read.
+  // Whether that produced a clean early-return or a P2002 depended on
+  // whether the seat was still AVAILABLE at that point — and createFixture
+  // used to leave it AVAILABLE under a PENDING_PAYMENT booking, a state the
+  // real createBooking() flow never produces (see helpers.ts). Both bugs are
+  // fixed now: the fixture mirrors createBooking's seat-locking, and
+  // applyPaymentOutcome locks the Booking row and branches on that instead
+  // of the stale read (apps/api/src/lib/payment.ts). See task-7-report.md
+  // for the flaky-run data from before this fix.
   it('issues one ticket when two distinct successes land at once', async () => {
-    const stamp = Date.now()
     const results = await Promise.allSettled([
       applyPaymentOutcome({
-        eventId: `evt_tkt_${stamp}_a`,
+        eventId: `evt_tkt_${fixture.bookingId}_a`,
         providerRef: fixture.providerRef,
         outcome: 'succeeded',
       }),
       applyPaymentOutcome({
-        eventId: `evt_tkt_${stamp}_b`,
+        eventId: `evt_tkt_${fixture.bookingId}_b`,
         providerRef: fixture.providerRef,
         outcome: 'succeeded',
       }),
@@ -68,11 +86,14 @@ describe('ticket issuance', () => {
 
     const tickets = await prisma.ticket.findMany({ where: { bookingId: fixture.bookingId } })
     expect(tickets).toHaveLength(1)
+
+    const booking = await prisma.booking.findUniqueOrThrow({ where: { id: fixture.bookingId } })
+    expect(booking.status).toBe('PAID')
   })
 
   it('issues no ticket when the payment fails', async () => {
     await applyPaymentOutcome({
-      eventId: `evt_tkt_${Date.now()}_fail`,
+      eventId: `evt_tkt_${fixture.bookingId}_fail`,
       providerRef: fixture.providerRef,
       outcome: 'failed',
     })

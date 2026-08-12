@@ -69,6 +69,16 @@ export async function createFixture(labelOrOptions: string | FixtureOptions = {}
   let bookingId = ''
   let providerRef = ''
   if (options.withBooking) {
+    // Mirror createBooking (apps/api/src/lib/booking.ts), which always
+    // flips the seat to BOOKED at hold time, in the same transaction as the
+    // Booking row. This fixture builds the Booking directly rather than
+    // through createBooking, so without this the seat would be left
+    // AVAILABLE under a PENDING_PAYMENT booking — a state the real HTTP
+    // flow never produces. That divergence was a real bug: it let a payment
+    // unit test's "recover" branch see allFree === true and issue a second
+    // ticket where production would have seen BOOKED and taken the
+    // REFUND_REQUIRED branch instead. See task-7-report.md.
+    await prisma.seat.update({ where: { id: seat.id }, data: { status: 'BOOKED' } })
     const booking = await prisma.booking.create({
       data: {
         userId: userIds[0],

@@ -1,6 +1,7 @@
 import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto'
 import type { Prisma } from '@prisma/client'
 import { TICKET_SIGNING_SECRET } from './config.js'
+import { prisma } from './prisma.js'
 
 // The QR carries "<ticketId>.<hmac>" so a scanner can tell a forged code
 // from a real one without a database round-trip. Signed with a secret
@@ -72,5 +73,46 @@ export async function issueTicket(
   const id = randomUUID()
   await tx.ticket.create({
     data: { id, bookingId, qrCodePayload: signTicketPayload(id) },
+  })
+}
+
+// Ownership is expressed inside the query, not checked after the fact —
+// a fetch-then-compare is one forgotten `if` away from leaking a stranger's
+// ticket, and the route then has nothing to get wrong.
+//
+// `select` here, not `include`: `include` adds relations on top of every
+// scalar column, so it would still return qrCodePayload on every row. The
+// signed payload only needs to leave the server on the single-ticket page
+// (getTicketForUser below), where it's rendered into an image server-side —
+// not shipped as text in a list response that ends up in more logs/caches
+// than necessary.
+export async function listTicketsForUser(userId: string) {
+  return await prisma.ticket.findMany({
+    where: { booking: { userId } },
+    orderBy: { issuedAt: 'desc' },
+    select: {
+      id: true,
+      issuedAt: true,
+      booking: {
+        include: {
+          showtime: { include: { event: { include: { venue: true } } } },
+          seats: { include: { seat: { include: { seatMap: true } } } },
+        },
+      },
+    },
+  })
+}
+
+export async function getTicketForUser(ticketId: string, userId: string) {
+  return await prisma.ticket.findFirst({
+    where: { id: ticketId, booking: { userId } },
+    include: {
+      booking: {
+        include: {
+          showtime: { include: { event: { include: { venue: true } } } },
+          seats: { include: { seat: { include: { seatMap: true } } } },
+        },
+      },
+    },
   })
 }

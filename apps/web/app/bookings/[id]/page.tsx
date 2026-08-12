@@ -2,6 +2,7 @@
 
 import { use, useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
+import Link from 'next/link'
 import { apiFetch } from '@/lib/api'
 import { Countdown } from './countdown'
 
@@ -127,7 +128,12 @@ export default function BookingPage({ params }: { params: Promise<{ id: string }
         </button>
       )}
       {booking.status === 'PAID' && (
-        <p className="text-green-700">ชำระเงินสำเร็จแล้ว ขอบคุณที่ใช้บริการ</p>
+        <>
+          <p className="text-green-700">ชำระเงินสำเร็จแล้ว ขอบคุณที่ใช้บริการ</p>
+          <Link href="/me/tickets" className="bg-black text-white p-2 rounded text-center">
+            ดูตั๋วของฉัน
+          </Link>
+        </>
       )}
       {booking.status === 'EXPIRED' && (
         <p className="text-gray-600">การจองนี้หมดเวลาชำระเงินแล้ว กรุณาทำการจองใหม่</p>

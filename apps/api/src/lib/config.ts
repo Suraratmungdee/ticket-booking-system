@@ -63,6 +63,32 @@ export const MAX_SEATS_PER_BOOKING = 8
 // The point of the cap is that one request cannot ask for a million rows.
 export const MAX_SEATS_PER_SEATMAP = 100
 
+// Seat-hold guard. Throttles how fast one account can fire hold requests —
+// bounds the damage of someone hammering the endpoint (by hand or by an
+// accidental client-side retry loop) and leaves room for a person changing
+// their mind repeatedly while picking seats. Keyed on the authenticated user
+// id rather than the IP: /showtimes/:id/seats/hold requires a session
+// anyway, and a user id comes from a JWT we signed instead of a header a
+// client can set, so this bucket is unaffected by whether TRUST_PROXY is on.
+//
+// LIMITATION: this is a rate limit, not a concurrency cap — it does not stop
+// one account from *accumulating* holds across many bookings over time.
+// MAX_SEATS_PER_BOOKING (8) x BOOKING_RATE_LIMIT_MAX (10/min) x
+// SEAT_HOLD_TTL_SECONDS (300s, in createBooking's expiresAt) works out to a
+// steady state of roughly 400 held seats per account — more than
+// MAX_SEATS_PER_SEATMAP (100) — because nothing caps how many PENDING_PAYMENT
+// bookings one user may have open at once. Closing that gap needs a cap on
+// concurrent PENDING_PAYMENT bookings per user, which this phase did not
+// build.
+//
+// The cap is AGREED BUT UNBUILT: on 12 Aug 2026 the project owner ruled it
+// should be 3 open PENDING_PAYMENT bookings per user (at most 24 seats held
+// at once, against a 100-seat zone). Recorded here because it is a decision,
+// not an open question — whoever builds it should use 3 rather than choosing
+// a number again.
+export const BOOKING_RATE_LIMIT_MAX = 10
+export const BOOKING_RATE_LIMIT_WINDOW_MS = 60 * 1000
+
 export const REDIS_URL = process.env.REDIS_URL ?? 'redis://localhost:6379'
 
 // 'mock' runs a self-hosted fake provider so the payment flow can be

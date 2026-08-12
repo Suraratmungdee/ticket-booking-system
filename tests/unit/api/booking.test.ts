@@ -184,12 +184,18 @@ describe('createBooking', () => {
   // a stale tab gets a 409 for a genuinely free seat.
   it('sweeps stale bookings before opening the seat-locking transaction', async () => {
     const order: string[] = []
+    // Two distinct queries now run inside the booking transaction — the new
+    // Showtime lock (see below) fires first, then the seat-locking query —
+    // so this counts calls to tell them apart rather than assuming there is
+    // only one.
+    let bookingTxQueryCalls = 0
     const queryRaw = vi.fn(async () => {
       // The very first call into the tx object is the sweep from
       // expireStaleBookings; txRuns' wrapper answers it with `[]` before
-      // this fn ever runs for it, so every call that reaches here is the
-      // seat-locking query — recording it proves the sweep already ran.
-      order.push('seat-lock-query')
+      // this fn ever runs for it, so every call that reaches here belongs to
+      // the booking transaction — recording it proves the sweep already ran.
+      bookingTxQueryCalls += 1
+      order.push(bookingTxQueryCalls === 1 ? 'showtime-lock-query' : 'seat-lock-query')
       return [{ id: 's1', status: 'AVAILABLE', price: 1000, showtimeId: 'st1', ...SCHEDULED }]
     })
     // Wrap $transaction ourselves (bypassing txRuns) so we can also observe
@@ -212,7 +218,54 @@ describe('createBooking', () => {
 
     await createBooking({ userId: 'u1', showtimeId: 'st1', seatIds: ['s1'] })
 
-    expect(order).toEqual(['sweep-transaction', 'seat-lock-query'])
+    expect(order).toEqual(['sweep-transaction', 'showtime-lock-query', 'seat-lock-query'])
+  })
+
+  // Closes the race with updateShowtime: createBooking must lock the
+  // Showtime row in its OWN statement, before the seat query, rather than
+  // folding it into the seat query's `FOR UPDATE OF s` (see booking.ts for
+  // why a combined multi-relation lock there can deadlock against a second,
+  // overlapping-seat createBooking call). This is the one test that fails
+  // if that lock statement is ever removed or reordered after the seat
+  // query.
+  it('locks the Showtime row, in its own statement, before the seat query', async () => {
+    const calls: string[] = []
+    let transactionCalls = 0
+    mockTransaction.mockImplementation(async (fn: (t: unknown) => unknown) => {
+      transactionCalls += 1
+      if (transactionCalls === 1) return fn({ $queryRaw: vi.fn().mockResolvedValue([]) })
+
+      const queryRaw = vi.fn(async (strings: TemplateStringsArray) => {
+        const sql = strings.join('')
+        calls.push(sql)
+        // The lock query selects FROM "Showtime" directly; the seat query
+        // only JOINs "Showtime" (as `t`), so this distinguishes them even
+        // though both mention the table name.
+        if (sql.includes('FROM "Showtime"')) return [{ id: 'st1' }]
+        return [{ id: 's1', status: 'AVAILABLE', price: 1000, showtimeId: 'st1', ...SCHEDULED }]
+      })
+      return fn({
+        $queryRaw: queryRaw,
+        seat: { updateMany: vi.fn() },
+        booking: { create: vi.fn().mockResolvedValue({ id: 'b1' }) },
+      })
+    })
+
+    await createBooking({ userId: 'u1', showtimeId: 'st1', seatIds: ['s1'] })
+
+    expect(calls).toHaveLength(2)
+    expect(calls[0]).toContain('"Showtime"')
+    // FOR SHARE, not FOR UPDATE: this lock only needs to exclude writers
+    // (updateShowtime), not other concurrent bookings on the same showtime.
+    // Pinning the exact clause, not just presence of a lock, so a
+    // well-meaning "tidy" back to FOR UPDATE — which would reintroduce
+    // per-showtime serialisation on the hottest path — fails this test.
+    // (Substring match is exact here: "FOR SHARE" is not a substring of
+    // "FOR KEY SHARE" or "FOR UPDATE", so either of those wrong strengths
+    // fails too.)
+    expect(calls[0]).toContain('FOR SHARE')
+    expect(calls[0]).not.toContain('FOR UPDATE')
+    expect(calls[1]).toContain('"Seat"')
   })
 
   it('rejects booking a seat on a CANCELLED showtime', async () => {

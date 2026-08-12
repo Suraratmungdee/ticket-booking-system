@@ -85,9 +85,26 @@ npm run dev:web   # รันเฉพาะ frontend
 - `.env` และ `.env.local` อยู่ใน `.gitignore` — **ห้าม commit** มีเฉพาะ `.env.example` ที่เป็นค่า placeholder
 - ตอน deploy production ต้องตั้ง `JWT_SECRET` จริง มิฉะนั้น backend จะไม่ยอมสตาร์ท
 - cookie ใช้ `SameSite=Lax` ตอน dev และสลับเป็น `None` + `Secure` อัตโนมัติเมื่อ `NODE_ENV=production` (รองรับกรณี deploy คนละ domain)
+- ก่อน deploy จริงครั้งแรก อ่าน [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) — environment variables ที่ต้องตั้ง, deploy order, rollback, และสิ่งที่ยังไม่เคยถูก verify
 
 ## สถานะงาน
 
-**Phase 1 เสร็จแล้ว** — auth + ค้นหา/ดู event, unit test 11 เคสผ่าน, build ผ่านทั้ง 2 app, ตรวจ manual ครบตาม checklist
+**ครบทั้ง 6 phase** — **186 unit test + 10 integration test ผ่าน**, build ผ่านทั้ง 2 app
 
-Phase ถัดไป (ยังไม่ทำ): เลือกที่นั่ง + seat hold ด้วย Redis → ชำระเงินผ่าน Stripe → ออกตั๋ว QR → admin panel
+| Phase | ทำอะไร |
+|---|---|
+| 1 | auth (bcrypt + JWT ใน httpOnly cookie), ค้นหา/ดู event |
+| 2 | ผังที่นั่ง, seat hold ใน Redis (TTL 5 นาที), สร้าง booking — กันที่นั่งซ้อนด้วย row lock ใน Postgres |
+| 3 | ชำระเงิน: checkout session, webhook พร้อมตรวจลายเซ็น HMAC จาก raw body, idempotency ด้วย unique constraint |
+| 4 | ออกตั๋ว QR (payload เซ็นด้วย HMAC) ใน transaction เดียวกับตอน booking เป็น `PAID`, หน้าตั๋วของฉัน, อีเมลยืนยันผ่าน Resend |
+| 5 | Admin panel: CRUD event/รอบ/ผังที่นั่ง, รายการจอง + filter, audit log, dashboard ยอดขาย |
+| 6 | Security headers, rate limit (login + จอง), สคริปต์ load test, [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) |
+
+### สิ่งที่ตัดออกโดยตั้งใจ ไม่ใช่ของค้าง
+
+- **ชำระเงินผ่าน mock provider ที่เขียนเอง ไม่ใช่ Stripe** — โครงสร้างเป็นของจริงครบ (checkout session, webhook, ตรวจลายเซ็น, idempotency, transaction เดียว) และแยกชั้น provider ไว้ให้เปลี่ยนไป Stripe ได้โดยไม่แตะ logic การจอง เหตุผลอยู่ใน `docs/superpowers/specs/2026-08-11-phase3-payment-design.md`
+- **ไม่มีการคืนเงิน** — `/admin/bookings` แสดงสถานะ `REFUND_REQUIRED` ให้คนไปกดคืนใน dashboard ของ provider เอง
+- **ไม่มีปุ่มยกเลิกรอบ** — `createBooking` อ่าน `Showtime.status` โดยล็อกเฉพาะแถวที่นั่ง การเปิดให้แก้ status ตอน runtime จะสร้าง race ทันที เหตุผลเต็มอยู่ใน `docs/superpowers/specs/2026-08-12-phase5-admin-panel-design.md`
+- **ไม่มี DELETE endpoint** — FK ทั้งสายเป็น RESTRICT และ `CLAUDE.md` §5 ห้ามลบข้อมูลจริง
+
+เอกสาร spec / plan / ผล review ของทุก phase อยู่ใน [`docs/superpowers/`](docs/superpowers/)

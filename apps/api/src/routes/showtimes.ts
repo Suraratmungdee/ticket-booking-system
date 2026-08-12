@@ -5,6 +5,7 @@ import { createBooking, SeatUnavailableError, TooManySeatsError } from '../lib/b
 import { requireAuth } from '../middleware/auth.js'
 import { logServerError } from '../lib/log.js'
 import { MAX_SEATS_PER_BOOKING } from '../lib/config.js'
+import { isBookingRateLimited, recordBookingAttempt } from '../lib/rate-limit.js'
 
 const router = Router()
 
@@ -40,6 +41,16 @@ export const holdSeatsHandler: RequestHandler = async (req, res) => {
 
   const userId = req.user?.id
   if (!userId) return res.status(401).json({ error: 'Unauthorized' })
+
+  if (isBookingRateLimited(userId)) {
+    return res.status(429).json({ error: 'Too many booking attempts. Please try again shortly.' })
+  }
+  // Reserved synchronously, before the await below — the same reason
+  // routes/auth.ts reserves before its await. Charging only after
+  // createBooking resolves would let a concurrent burst all read the same
+  // pre-increment count and pass the gate together, which is precisely the
+  // sweep-the-showtime case this guards.
+  recordBookingAttempt(userId)
 
   try {
     const booking = await createBooking({ userId, showtimeId: id, seatIds: parsed.data.seatIds })

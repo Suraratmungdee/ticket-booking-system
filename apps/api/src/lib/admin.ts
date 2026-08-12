@@ -113,6 +113,26 @@ export async function updateShowtime(
   input: { startTime?: Date; endTime?: Date },
 ) {
   return prisma.$transaction(async (tx) => {
+    // createBooking reads Showtime.startTime and Showtime.status inside its
+    // own transaction — see the lock it takes there for the full reasoning.
+    // Without a lock here, a booking transaction can read a future
+    // startTime, pass its "showtime has not started" gate, and commit while
+    // this write moves the showtime into the past — a booking for a show
+    // that already began.
+    //
+    // Taking the lock here serialises the two: a booking already holding
+    // this row blocks this write until it commits, and this write blocks a
+    // booking that has not yet locked the row until this transaction
+    // commits. See booking.ts for why the two sides can never deadlock.
+    const locked = await tx.$queryRaw<{ id: string }[]>`
+      SELECT id FROM "Showtime" WHERE id = ${id} FOR UPDATE
+    `
+    if (locked.length === 0) {
+      // Matches what Prisma's update would have thrown, so the route's
+      // existing P2025 -> 404 mapping keeps working unchanged.
+      throw Object.assign(new Error('Showtime not found'), { code: 'P2025' })
+    }
+
     const showtime = await tx.showtime.update({ where: { id }, data: input })
     await recordAudit(tx, {
       adminId,

@@ -8,11 +8,17 @@ This document is for whoever puts this system online for the first time. It assu
 
 Read this section before anything else. It is the point of this document, not a footnote.
 
-- **The confirmation email has never been sent.** No `RESEND_API_KEY` has ever been configured anywhere in this project's history, so the send path in `apps/api/src/lib/email.ts` (the `fetch` call to `https://api.resend.com/emails`) has never executed once. Only the request shape and the no-key logging fallback (`console.info('[email] would send...')`) are proven to work. A wrong `EMAIL_FROM` domain, an unverified sender, or a malformed request to a real provider would surface for the first time in staging — not before.
-- **Nobody has opened the six pages built in Phases 4 and 5 in a browser.** `/me/tickets`, `/me/tickets/[id]`, `/admin`, `/admin/events`, `/admin/events/[id]/showtimes`, `/admin/bookings` — every check on these was made at the HTTP layer with curl against the API. Rendering, layout, client-side fetch wiring, and error states in the actual browser are unverified.
-- **No QR code has been scanned with a real camera.** The signing and rendering code is tested; a physical scan of a physical or on-screen code has not happened.
+**Verified on 12 Aug 2026 — no longer open:**
 
-Budget time to check all three manually before or immediately after the first deploy.
+- **The confirmation email sends and arrives.** A `RESEND_API_KEY` was configured (in the gitignored `apps/api/.env`) and the send path in `apps/api/src/lib/email.ts` executed against the real API: Resend returned `200` with a message id, and the mail reached a real inbox. Also confirmed on the wire: the HTML escaping holds (a payload containing `<script>` arrived as `&lt;script&gt;`), and the Thai Buddhist-era date renders correctly.
+  **Still unproven:** nothing has ever been sent from a *verified custom domain*. `EMAIL_FROM` is `onboarding@resend.dev`, Resend's shared testing sender, which works without domain verification. A production deploy that sets `EMAIL_FROM` to an address on a domain you have not verified with Resend **will be rejected**. Verify the domain first, then change `EMAIL_FROM`.
+- **The customer-facing ticket pages render.** `/me/tickets` and `/me/tickets/[id]` were walked in a real browser, end to end from searching for an event through seat selection, booking, mock payment, and arriving at the QR page.
+
+**Still never verified — budget time for these:**
+
+- **The four admin pages have not been opened in a browser.** `/admin`, `/admin/events`, `/admin/events/[id]/showtimes`, `/admin/bookings` — every check on these was made at the HTTP layer with curl against the API. Rendering, layout, client-side fetch wiring, and error states are unverified.
+- **No QR code has been scanned with a real camera.** The signing and rendering code is tested and the image renders in a browser; a physical scan has not happened. A correct scan decodes to `<ticketId>.<64 hex characters>`.
+- **No Stripe integration exists.** See the `PAYMENT_PROVIDER` row below — this is a gap in the code, not just in testing.
 
 ## 1. Required environment variables
 
@@ -24,7 +30,9 @@ Mostly derived from `apps/api/src/lib/config.ts`, with two exceptions noted in t
 | `JWT_SECRET` | Signs/verifies session JWTs | **Boot guard.** Missing in production → refuses to start (`JWT_SECRET must be set when NODE_ENV=production`). Set to the exact `.env.example` placeholder (`dev-secret-change-me`) → also refused, since that string is public. Unset in non-production, it silently falls back to that same placeholder. |
 | `PAYMENT_WEBHOOK_SECRET` | Verifies the payment provider's webhook signature | **Boot guard**, same two checks as `JWT_SECRET`: missing in production refuses to start, and the placeholder value (`dev-webhook-secret-change-me`) is rejected outright. Wrong-but-set value doesn't crash boot — it just means every real webhook fails signature verification and payments never confirm. |
 | `TICKET_SIGNING_SECRET` | Signs the QR payload on issued tickets | **Boot guard**, same pattern: missing or left as the placeholder (`dev-ticket-secret-change-me`) refuses to start in production. |
-| `PAYMENT_PROVIDER` | Selects `stripe` (default) or `mock` | **Boot guard.** `mock` in production is refused outright — the mock provider marks any booking PAID with no money involved, so shipping it live is a free-tickets endpoint. Default when unset is `stripe`, not `mock`. |
+| `PAYMENT_PROVIDER` | Selects `stripe` (default) or `mock` | **Boot guard.** `mock` in production is refused outright — the mock provider marks any booking PAID with no money involved, so shipping it live is a free-tickets endpoint. Default when unset is `stripe`, not `mock`. **But read the warning directly below this table before setting either value.** |
+
+> **There is no Stripe integration.** Nothing under `apps/api/src` references Stripe, and `createCheckoutSession` mints a local `sess_<uuid>` regardless of which value `PAYMENT_PROVIDER` holds. `mock` is the only provider actually implemented. Setting `PAYMENT_PROVIDER=stripe` and supplying a webhook secret therefore gets you a booking flow with **no real payment behind it** — bookings will simply never reach `PAID`, because nothing charges anyone and no real webhook arrives. The provider seam exists so a Stripe implementation can be dropped in without touching booking logic; writing it is unstarted work, not configuration.
 | `FRONTEND_ORIGIN` | The one origin CORS allows; also the base URL used to build ticket links in confirmation emails | No boot guard. Wrong value: the browser's requests get CORS-rejected (frontend looks completely broken), and/or email ticket links point at the wrong host. Defaults to `http://localhost:3000` if unset — wrong in any real deploy. |
 | `REDIS_URL` | Seat-hold storage (Redis) | No boot guard. Wrong or unreachable: seat holds fail, which blocks booking end-to-end. Defaults to `redis://localhost:6379`. |
 | `API_BASE_URL` | Where the **mock** provider posts its webhook back to | Only read when `PAYMENT_PROVIDER=mock`. Irrelevant on a real `stripe` deploy. Defaults to `http://localhost:4000`. |
@@ -52,6 +60,17 @@ Mostly derived from `apps/api/src/lib/config.ts`, with two exceptions noted in t
 4. Deploy the new `apps/web` version, pointed at the new API via `NEXT_PUBLIC_API_URL`.
 
 Every migration currently in `apps/api/prisma/migrations/` is additive (verified below), so the *old* code can keep running against the *new* schema for the window between step 2 and step 3. That's what makes "migrate first, deploy second" safe here — it stops being true the moment any migration drops or renames a column or table the old code still reads.
+
+> **Additive does not mean it cannot fail.** `20260812135940_unique_zone_per_showtime` runs `CREATE UNIQUE INDEX "SeatMap_showtimeId_zoneName_key"`, which **aborts** if the target database already holds two seat maps with the same `zoneName` on one showtime — halting step 2 partway. Check first:
+>
+> ```sql
+> SELECT "showtimeId", "zoneName", count(*) FROM "SeatMap"
+> GROUP BY 1, 2 HAVING count(*) > 1;
+> ```
+>
+> Resolve any rows it returns *before* deploying — and treat that as a data decision for a human, since merging or removing a zone destroys seat rows that bookings may reference.
+>
+> One more thing about that window: between the index landing and the new code going live, a duplicate-zone `POST /admin/seatmaps` gets a raw `500` from the old code instead of the `409` the new code returns. Cosmetic, admin-only, and it resolves itself at step 3.
 
 ## 4. Rollback
 

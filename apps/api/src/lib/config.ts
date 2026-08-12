@@ -80,6 +80,12 @@ export const MAX_SEATS_PER_SEATMAP = 100
 // bookings one user may have open at once. Closing that gap needs a cap on
 // concurrent PENDING_PAYMENT bookings per user, which this phase did not
 // build.
+//
+// The cap is AGREED BUT UNBUILT: on 12 Aug 2026 the project owner ruled it
+// should be 3 open PENDING_PAYMENT bookings per user (at most 24 seats held
+// at once, against a 100-seat zone). Recorded here because it is a decision,
+// not an open question — whoever builds it should use 3 rather than choosing
+// a number again.
 export const BOOKING_RATE_LIMIT_MAX = 10
 export const BOOKING_RATE_LIMIT_WINDOW_MS = 60 * 1000
 

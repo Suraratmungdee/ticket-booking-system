@@ -50,22 +50,35 @@ describe('ticket issuance', () => {
     expect(verifyTicketPayload(tickets[0].qrCodePayload)).toBe(tickets[0].id)
   })
 
-  // The one that matters, and the one unit tests cannot see. Two DIFFERENT
-  // eventIds mean the WebhookEvent guard does NOT short-circuit the second
-  // delivery — so the Ticket.bookingId unique constraint is the only thing
-  // left holding. Drop that index and this test must go red.
+  // CORRECTED CLAIM (final Phase 4 review): this comment used to say
+  // dropping Ticket_bookingId_key would turn this test red, and that it
+  // reproduces the race Task 7's locked-read fix (3efed72) closed. Neither
+  // held up: the reviewer reverted 3efed72 in the working tree and ran the
+  // integration suite eight times — 7/7 green every run. What actually
+  // happens with Promise.allSettled here is that the two applyPaymentOutcome
+  // calls do not overlap in the window that matters: whichever transaction
+  // gets the Booking row lock (FOR UPDATE) first runs to completion and
+  // commits PAID well before the second transaction's locked read executes,
+  // so the loser simply reads an already-committed PAID status and takes the
+  // early return at the top of applyPaymentOutcome. Ticket.bookingId's
+  // unique constraint is never exercised by this test.
   //
-  // This test used to be flaky: applyPaymentOutcome read payment.booking
-  // .status once and trusted it for the rest of the transaction, so the CAS
-  // loser could fall into the recover block on a stale PENDING_PAYMENT read.
-  // Whether that produced a clean early-return or a P2002 depended on
-  // whether the seat was still AVAILABLE at that point — and createFixture
-  // used to leave it AVAILABLE under a PENDING_PAYMENT booking, a state the
-  // real createBooking() flow never produces (see helpers.ts). Both bugs are
-  // fixed now: the fixture mirrors createBooking's seat-locking, and
-  // applyPaymentOutcome locks the Booking row and branches on that instead
-  // of the stale read (apps/api/src/lib/payment.ts). See task-7-report.md
-  // for the flaky-run data from before this fix.
+  // What this test DOES cover: applying two distinct successful deliveries
+  // (different eventIds, so the WebhookEvent guard does not short-circuit
+  // either one) is idempotent on the happy path — exactly one ticket, the
+  // booking ends up PAID, regardless of which call Node happens to schedule
+  // first. That is a real and worth-having guarantee; it is just not a
+  // concurrency test.
+  //
+  // What DOES protect the locked-read fix: the unit test 'branches on the
+  // row-locked booking status, not the stale nested payment.booking.status'
+  // in tests/unit/api/payment.test.ts, which mocks the row-lock query
+  // directly and asserts the code branches on ITS result rather than on
+  // payment.booking.status. Making an integration test truly schedule two
+  // real transactions into the overlapping window was attempted and is
+  // genuinely hard to do deterministically — left undone rather than shipped
+  // as a slow test that still wouldn't reliably hit the race. See
+  // task-7-report.md for the flaky-run data from before 3efed72.
   it('issues one ticket when two distinct successes land at once', async () => {
     const results = await Promise.allSettled([
       applyPaymentOutcome({

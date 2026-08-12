@@ -109,7 +109,7 @@ npm run test:e2e  # Playwright: flow ค้นหา→เลือกที่�
 | `GET`/`POST` | `/mock-provider/sessions/:providerRef[/complete]` | – | จำลอง payment provider — mount เฉพาะตอน `PAYMENT_PROVIDER=mock` |
 | `GET` | `/health` | – | health check |
 
-รายชื่อ field/validation ทั้งหมดต่อ endpoint: `Ticket-Booking-System-Plan.md` หัวข้อ 5.1 รหัสผ่านไม่เคยถูกเก็บเป็น plaintext และ JWT ไม่เคยถูกส่งกลับใน response body
+รายชื่อ field/validation ทั้งหมดต่อ endpoint: `docs/deliverables/05-database-schema.md` หัวข้อ 5.1 รหัสผ่านไม่เคยถูกเก็บเป็น plaintext และ JWT ไม่เคยถูกส่งกลับใน response body
 
 ## หมายเหตุด้านความปลอดภัย
 

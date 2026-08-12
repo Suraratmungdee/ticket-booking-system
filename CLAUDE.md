@@ -59,7 +59,7 @@ package.json           # root, ประกาศ workspaces: ["apps/*"]
 
 ## 5. สิ่งที่ห้าม Agent ตัดสินใจเองเด็ดขาด
 
-ดูรายละเอียดเต็มในเอกสาร `Ticket-Booking-System-Plan.md` หัวข้อ "จุดที่ต้องให้คน Review" แต่สรุปสั้นๆ ที่ต้องจำ:
+ดูรายละเอียดเต็มในเอกสาร `docs/deliverables/08-human-review-required.md` แต่สรุปสั้นๆ ที่ต้องจำ:
 
 - ห้าม deploy ขึ้น production หรือ merge เข้า branch `main` เอง
 - ห้ามรัน migration กับฐานข้อมูล production เอง

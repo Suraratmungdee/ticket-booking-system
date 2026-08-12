@@ -255,6 +255,7 @@ describe('applyPaymentOutcome', () => {
         }),
         update: paymentUpdate,
       },
+      $queryRaw: vi.fn().mockResolvedValue([{ status: 'PENDING_PAYMENT' }]),
       booking: { update: bookingUpdate },
     })
 
@@ -283,6 +284,7 @@ describe('applyPaymentOutcome', () => {
         }),
         update: paymentUpdate,
       },
+      $queryRaw: vi.fn().mockResolvedValue([{ status: 'PAID' }]),
       booking: { update: bookingUpdate },
     })
 
@@ -307,6 +309,7 @@ describe('applyPaymentOutcome', () => {
         update: vi.fn(),
         updateMany: vi.fn().mockResolvedValue({ count: 1 }),
       },
+      $queryRaw: vi.fn().mockResolvedValue([{ status: 'PENDING_PAYMENT' }]),
       booking: { update: vi.fn(), updateMany: bookingUpdateMany },
     })
 
@@ -324,6 +327,44 @@ describe('applyPaymentOutcome', () => {
     expect(result.transitioned).toBe(true)
   })
 
+  // Regression test for the production bug a reviewer caught in Phase 4
+  // Task 7: two distinct eventIds racing on one providerRef can both read
+  // payment.booking.status as PENDING_PAYMENT before either commits. The
+  // fix locks the Booking row (SELECT ... FOR UPDATE) right after the
+  // payment lookup and branches on THAT read instead. This test gives the
+  // two values conflicting on purpose — stale nested value says
+  // PENDING_PAYMENT, the locked read says PAID — to prove the code follows
+  // the locked value. Without the fix (branching on payment.booking.status
+  // instead), this attempts the PENDING_PAYMENT CAS and issues a second
+  // ticket instead of taking the already-PAID no-op return.
+  it('branches on the row-locked booking status, not the stale nested payment.booking.status', async () => {
+    const bookingUpdateMany = vi.fn().mockResolvedValue({ count: 1 })
+    const queryRaw = vi.fn().mockResolvedValue([{ status: 'PAID' }])
+    txRuns({
+      webhookEvent: { create: vi.fn().mockResolvedValue({}) },
+      payment: {
+        findUnique: vi.fn().mockResolvedValue({
+          id: 'p1',
+          bookingId: 'b1',
+          status: 'SUCCEEDED',
+          booking: { id: 'b1', status: 'PENDING_PAYMENT', seats: [] },
+        }),
+        update: vi.fn(),
+        updateMany: vi.fn(),
+      },
+      $queryRaw: queryRaw,
+      booking: { update: vi.fn(), updateMany: bookingUpdateMany },
+    })
+
+    const result = await applyPaymentOutcome({ eventId: 'evt_lock', providerRef: 'ref_1', outcome: 'succeeded' })
+
+    expect(queryRaw).toHaveBeenCalled()
+    expect(bookingUpdateMany).not.toHaveBeenCalled()
+    expect(m.ticketCreate).not.toHaveBeenCalled()
+    expect(result).toEqual({ applied: true, bookingStatus: 'PAID', bookingId: 'b1' })
+    expect(result.transitioned).toBeFalsy()
+  })
+
   // The compare-and-swap that closes CRITICAL 1: expireStaleBookings() can
   // commit EXPIRED on this same booking between the stale read at the top of
   // the transaction and this write. Losing the CAS (count: 0) must not be
@@ -335,10 +376,14 @@ describe('applyPaymentOutcome', () => {
     const bookingUpdate = vi.fn()
     const bookingUpdateMany = vi.fn().mockResolvedValue({ count: 0 })
     const seatUpdateMany = vi.fn()
-    const queryRaw = vi.fn().mockResolvedValue([
-      { id: 's1', status: 'AVAILABLE' },
-      { id: 's2', status: 'AVAILABLE' },
-    ])
+    const queryRaw = vi.fn()
+      // First call: the new booking-row lock this fix adds. Second: the
+      // pre-existing seat lock in the recover block.
+      .mockResolvedValueOnce([{ status: 'PENDING_PAYMENT' }])
+      .mockResolvedValueOnce([
+        { id: 's1', status: 'AVAILABLE' },
+        { id: 's2', status: 'AVAILABLE' },
+      ])
     txRuns({
       webhookEvent: { create: vi.fn().mockResolvedValue({}) },
       payment: {
@@ -377,10 +422,12 @@ describe('applyPaymentOutcome', () => {
     const bookingUpdate = vi.fn()
     const bookingUpdateMany = vi.fn().mockResolvedValue({ count: 0 })
     const seatUpdateMany = vi.fn()
-    const queryRaw = vi.fn().mockResolvedValue([
-      { id: 's1', status: 'AVAILABLE' },
-      { id: 's2', status: 'BOOKED' },
-    ])
+    const queryRaw = vi.fn()
+      .mockResolvedValueOnce([{ status: 'PENDING_PAYMENT' }])
+      .mockResolvedValueOnce([
+        { id: 's1', status: 'AVAILABLE' },
+        { id: 's2', status: 'BOOKED' },
+      ])
     txRuns({
       webhookEvent: { create: vi.fn().mockResolvedValue({}) },
       payment: {
@@ -432,6 +479,7 @@ describe('applyPaymentOutcome', () => {
         update: vi.fn(),
         updateMany: paymentUpdateMany,
       },
+      $queryRaw: vi.fn().mockResolvedValue([{ status: 'PENDING_PAYMENT' }]),
       booking: { update: bookingUpdate, updateMany: vi.fn() },
     })
 
@@ -469,10 +517,12 @@ describe('applyPaymentOutcome', () => {
         update: vi.fn(),
         updateMany: vi.fn().mockResolvedValue({ count: 1 }),
       },
-      $queryRaw: vi.fn().mockResolvedValue([
-        { id: 's1', status: 'AVAILABLE' },
-        { id: 's2', status: 'AVAILABLE' },
-      ]),
+      $queryRaw: vi.fn()
+        .mockResolvedValueOnce([{ status: 'EXPIRED' }])
+        .mockResolvedValueOnce([
+          { id: 's1', status: 'AVAILABLE' },
+          { id: 's2', status: 'AVAILABLE' },
+        ]),
       seat: { updateMany: seatUpdateMany },
       booking: { update: bookingUpdate },
     })
@@ -507,10 +557,12 @@ describe('applyPaymentOutcome', () => {
         update: vi.fn(),
         updateMany: vi.fn().mockResolvedValue({ count: 1 }),
       },
-      $queryRaw: vi.fn().mockResolvedValue([
-        { id: 's1', status: 'AVAILABLE' },
-        { id: 's2', status: 'BOOKED' },
-      ]),
+      $queryRaw: vi.fn()
+        .mockResolvedValueOnce([{ status: 'EXPIRED' }])
+        .mockResolvedValueOnce([
+          { id: 's1', status: 'AVAILABLE' },
+          { id: 's2', status: 'BOOKED' },
+        ]),
       seat: { updateMany: seatUpdateMany },
       booking: { update: bookingUpdate },
     })
@@ -545,6 +597,7 @@ describe('applyPaymentOutcome', () => {
         update: vi.fn(),
         updateMany: vi.fn().mockResolvedValue({ count: 1 }),
       },
+      $queryRaw: vi.fn().mockResolvedValue([{ status: 'PAID' }]),
       booking: { update: bookingUpdate },
     })
 
@@ -561,7 +614,10 @@ describe('applyPaymentOutcome', () => {
   it('leaves a REFUND_REQUIRED booking untouched on a duplicate success', async () => {
     const bookingUpdate = vi.fn()
     const seatUpdateMany = vi.fn()
-    const queryRaw = vi.fn()
+    // Called once now, for the booking-row lock this fix adds — but never a
+    // second time for the seat lock, since REFUND_REQUIRED short-circuits
+    // before the recover block.
+    const queryRaw = vi.fn().mockResolvedValue([{ status: 'REFUND_REQUIRED' }])
     txRuns({
       webhookEvent: { create: vi.fn().mockResolvedValue({}) },
       payment: {
@@ -580,7 +636,7 @@ describe('applyPaymentOutcome', () => {
 
     const result = await applyPaymentOutcome({ eventId: 'evt_7', providerRef: 'ref_1', outcome: 'succeeded' })
 
-    expect(queryRaw).not.toHaveBeenCalled()
+    expect(queryRaw).toHaveBeenCalledTimes(1)
     expect(seatUpdateMany).not.toHaveBeenCalled()
     expect(bookingUpdate).not.toHaveBeenCalled()
     expect(result.bookingStatus).toBe('REFUND_REQUIRED')
@@ -606,7 +662,9 @@ describe('applyPaymentOutcome', () => {
         update: vi.fn(),
         updateMany: vi.fn().mockResolvedValue({ count: 1 }),
       },
-      $queryRaw: vi.fn().mockResolvedValue([{ id: 's1', status: 'AVAILABLE' }]),
+      $queryRaw: vi.fn()
+        .mockResolvedValueOnce([{ status: 'EXPIRED' }])
+        .mockResolvedValueOnce([{ id: 's1', status: 'AVAILABLE' }]),
       seat: { updateMany: seatUpdateMany },
       booking: { update: bookingUpdate },
     })
@@ -634,6 +692,7 @@ describe('applyPaymentOutcome — ticket issuance', () => {
         update: vi.fn(),
         updateMany: vi.fn().mockResolvedValue({ count: 1 }),
       },
+      $queryRaw: vi.fn().mockResolvedValue([{ status: 'PENDING_PAYMENT' }]),
       booking: { update: vi.fn(), updateMany: vi.fn().mockResolvedValue({ count: 1 }) },
     })
 
@@ -668,10 +727,12 @@ describe('applyPaymentOutcome — ticket issuance', () => {
         update: vi.fn(),
         updateMany: vi.fn().mockResolvedValue({ count: 1 }),
       },
-      $queryRaw: vi.fn().mockResolvedValue([
-        { id: 's1', status: 'AVAILABLE' },
-        { id: 's2', status: 'AVAILABLE' },
-      ]),
+      $queryRaw: vi.fn()
+        .mockResolvedValueOnce([{ status: 'PENDING_PAYMENT' }])
+        .mockResolvedValueOnce([
+          { id: 's1', status: 'AVAILABLE' },
+          { id: 's2', status: 'AVAILABLE' },
+        ]),
       seat: { updateMany: vi.fn() },
       booking: { update: vi.fn(), updateMany: vi.fn().mockResolvedValue({ count: 0 }) },
     })
@@ -699,6 +760,7 @@ describe('applyPaymentOutcome — ticket issuance', () => {
         }),
         update: vi.fn(),
       },
+      $queryRaw: vi.fn().mockResolvedValue([{ status: 'PENDING_PAYMENT' }]),
       booking: { update: vi.fn() },
     })
 
@@ -722,6 +784,7 @@ describe('applyPaymentOutcome — ticket issuance', () => {
         update: vi.fn(),
         updateMany: vi.fn().mockResolvedValue({ count: 1 }),
       },
+      $queryRaw: vi.fn().mockResolvedValue([{ status: 'REFUND_REQUIRED' }]),
       booking: { update: vi.fn(), updateMany: vi.fn() },
     })
 
@@ -752,10 +815,12 @@ describe('applyPaymentOutcome — ticket issuance', () => {
         update: vi.fn(),
         updateMany: vi.fn().mockResolvedValue({ count: 1 }),
       },
-      $queryRaw: vi.fn().mockResolvedValue([
-        { id: 's1', status: 'AVAILABLE' },
-        { id: 's2', status: 'BOOKED' },
-      ]),
+      $queryRaw: vi.fn()
+        .mockResolvedValueOnce([{ status: 'PENDING_PAYMENT' }])
+        .mockResolvedValueOnce([
+          { id: 's1', status: 'AVAILABLE' },
+          { id: 's2', status: 'BOOKED' },
+        ]),
       seat: { updateMany: vi.fn() },
       booking: { update: vi.fn(), updateMany: vi.fn().mockResolvedValue({ count: 0 }) },
     })

@@ -113,6 +113,22 @@ export async function applyPaymentOutcome(input: {
     })
     if (!payment) throw new PaymentNotFoundError()
 
+    // Lock the booking row and read its status from THIS, not from
+    // payment.booking.status above. Two distinct eventIds for one
+    // providerRef (normal — real providers send more than one event per
+    // payment) can both read payment.booking.status as PENDING_PAYMENT
+    // before either commits. The winner CASes to PAID and issues a ticket;
+    // the old code let the loser go on believing PENDING_PAYMENT too, fall
+    // into the recover block below, find the seats already BOOKED (real
+    // bookings lock seats at hold time, in createBooking), and stamp
+    // REFUND_REQUIRED over a booking that was just legitimately paid —
+    // Payment.SUCCEEDED + a valid Ticket + Booking.REFUND_REQUIRED, all at
+    // once. FOR UPDATE serializes the two calls on this row: the loser
+    // blocks here until the winner commits, then reads the real PAID.
+    const [{ status: bookingStatus }] = await tx.$queryRaw<{ status: string }[]>`
+      SELECT status::text AS status FROM "Booking" WHERE id = ${payment.bookingId} FOR UPDATE
+    `
+
     if (input.outcome === 'failed') {
       // A stale/out-of-order failure (different eventId, same providerRef)
       // arriving after a success already applied must not downgrade a
@@ -123,14 +139,14 @@ export async function applyPaymentOutcome(input: {
       }
       // A failed charge never moves the booking in either direction — the
       // user can retry until the hold expires, and expiry is the sweep's job.
-      return { applied: true, bookingStatus: payment.booking.status, bookingId: payment.bookingId }
+      return { applied: true, bookingStatus, bookingId: payment.bookingId }
     }
 
     // REFUND_REQUIRED is terminal: a refund may already be sitting in an
     // admin's queue for this booking. A duplicate success delivered after
     // that must not silently clear it and re-book seats that happen to be
     // free again.
-    if (payment.booking.status === 'REFUND_REQUIRED') {
+    if (bookingStatus === 'REFUND_REQUIRED') {
       return { applied: true, bookingStatus: 'REFUND_REQUIRED', bookingId: payment.bookingId }
     }
 
@@ -145,6 +161,18 @@ export async function applyPaymentOutcome(input: {
     // onto the row now carrying the fresh ref — the retry's session would
     // then look paid without anyone having paid it, and a real payment
     // against the fresh ref would silently no-op as already-SUCCEEDED.
+    //
+    // LIMITATION: payment.status above was read before the booking lock,
+    // not re-checked under it, so two concurrent success deliveries for the
+    // same providerRef (distinct eventIds) can both see status: 'PENDING'
+    // and both run this update — the where clause compares id + providerRef
+    // only, not status, so the second stamp silently overwrites the first's
+    // paidAt with a later timestamp. Left alone this round (human decision,
+    // 12 Aug 2026): closing it means adding status: 'PENDING' to this
+    // updateMany's where and, on stamped.count === 0, distinguishing
+    // "already SUCCEEDED, genuine no-op" from the existing "checkout retry
+    // reset the providerRef" case below, which currently assumes any miss
+    // means the ref changed.
     if (payment.status !== 'SUCCEEDED') {
       const stamped = await tx.payment.updateMany({
         where: { id: payment.id, providerRef: input.providerRef },
@@ -158,7 +186,7 @@ export async function applyPaymentOutcome(input: {
       }
     }
 
-    if (payment.booking.status === 'PAID') {
+    if (bookingStatus === 'PAID') {
       // Re-delivery of an already-applied success: the ticket was issued
       // when the booking first became PAID. Not here — issueTicket now lets
       // a duplicate-key error propagate and abort the transaction (see the
@@ -172,7 +200,7 @@ export async function applyPaymentOutcome(input: {
       return { applied: true, bookingStatus: 'PAID', bookingId: payment.bookingId }
     }
 
-    if (payment.booking.status === 'PENDING_PAYMENT') {
+    if (bookingStatus === 'PENDING_PAYMENT') {
       // updateMany with status in the where is the compare half of a
       // compare-and-swap against expireStaleBookings(), which takes
       // FOR UPDATE SKIP LOCKED on this same row and can commit EXPIRED
@@ -197,9 +225,12 @@ export async function applyPaymentOutcome(input: {
         // that must NOT re-send the email.
         return { applied: true, bookingStatus: 'PAID', bookingId: payment.bookingId, transitioned: true }
       }
-      // Lost to the expiry sweep — fall through to the recover-or-
-      // REFUND_REQUIRED branch below, which re-locks the seats and decides
-      // honestly rather than trusting the stale read above.
+      // won.count === 0 here should no longer be reachable: bookingStatus
+      // was read under the row lock taken above, and that lock is held
+      // until this transaction commits, so nothing else could have changed
+      // this row between the read and this CAS. Kept as belt-and-braces —
+      // if it ever does fire, fall through to the recover-or-REFUND_REQUIRED
+      // branch below rather than assume success.
     }
 
     // The money case: the hold lapsed before the webhook landed, the seats

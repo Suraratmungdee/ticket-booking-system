@@ -27,9 +27,11 @@ async function main() {
   assertSeedIsSafe()
 
   await prisma.bookingSeat.deleteMany()
-  // Ticket.bookingId is a RESTRICT FK (Phase 4) — deleting bookings before
-  // their tickets fails with an FK violation whenever any ticket exists.
+  // Ticket.bookingId and Payment.bookingId are both RESTRICT FKs — deleting
+  // bookings before either fails with an FK violation whenever a ticket or
+  // payment row exists (Ticket since Phase 4, Payment since Phase 3).
   await prisma.ticket.deleteMany()
+  await prisma.payment.deleteMany()
   await prisma.booking.deleteMany()
   await prisma.seat.deleteMany()
   await prisma.seatMap.deleteMany()

@@ -9,6 +9,7 @@ import webhooksRouter from './routes/webhooks.js'
 import ticketsRouter, { meTicketsRouter } from './routes/tickets.js'
 import adminRouter from './routes/admin.js'
 import { FRONTEND_ORIGIN, TRUST_PROXY, PAYMENT_PROVIDER, assertPaymentProviderIsSafe } from './lib/config.js'
+import { securityHeaders } from './middleware/security-headers.js'
 
 assertPaymentProviderIsSafe()
 
@@ -19,6 +20,10 @@ const app = express()
 if (TRUST_PROXY) {
   app.set('trust proxy', true)
 }
+
+// Mounted before cors() and every route, so even a CORS rejection or an
+// unmatched-route 404 carries these headers.
+app.use(securityHeaders)
 
 app.use(cors({ origin: FRONTEND_ORIGIN, credentials: true }))
 // Must be mounted before express.json(): the JSON parser reads the request

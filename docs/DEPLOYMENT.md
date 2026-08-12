@@ -16,7 +16,7 @@ Budget time to check all three manually before or immediately after the first de
 
 ## 1. Required environment variables
 
-Derived from `apps/api/src/lib/config.ts`. "Boot guard" means `assertPaymentProviderIsSafe()` (called at the top of `apps/api/src/index.ts`) or the top-level check in `config.ts` — both run only when `NODE_ENV=production`, and both `throw`, which crashes the process before it starts listening.
+Mostly derived from `apps/api/src/lib/config.ts`, with two exceptions noted in the table below: `PORT` is read directly in `apps/api/src/index.ts`, and `DATABASE_URL` is read by Prisma via `apps/api/prisma/schema.prisma`, not by `config.ts`. "Boot guard" means `assertPaymentProviderIsSafe()` (called at the top of `apps/api/src/index.ts`) or the top-level check in `config.ts` — both run only when `NODE_ENV=production`, and both `throw`, which crashes the process before it starts listening.
 
 | Variable | What it does | If missing or wrong |
 |---|---|---|
@@ -84,7 +84,7 @@ If a specific migration genuinely must be undone:
   BookingSeat rows for the contended seat: 1
   PASS — exactly one booking holds the seat
   ```
-- It cleans up everything it creates (scoped by its own run-timestamp), and it measures correctness only — no latency or throughput numbers. That needs a real load-testing tool, which is a new dependency and out of scope until someone asks for a capacity number.
+- On the success path, it cleans up everything it creates (scoped by its own run-timestamp). The teardown is plain statements at the end of `main()`, not a `try/finally`, so if the script throws partway through (a failed registration, a dropped connection mid-burst), the cleanup is skipped and that run's venue, event, showtime, seat map, seat, users, and any bookings are stranded in the shared dev Postgres — harmless to other runs (ids are timestamp-stamped) but visible as a leftover `load <stamp> event` in `/events` and `/admin/events`. If a run dies mid-way, delete that run's rows by hand (filter on its `load <stamp>` name/email prefix) rather than leaving them to accumulate. It also measures correctness only — no latency or throughput numbers. That needs a real load-testing tool, which is a new dependency and out of scope until someone asks for a capacity number.
 
 ## See also
 

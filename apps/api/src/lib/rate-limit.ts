@@ -67,13 +67,14 @@ const bookingBucket = createBucket(BOOKING_RATE_LIMIT_MAX, BOOKING_RATE_LIMIT_WI
 // LIMITATION: keyed on req.ip. Express only derives req.ip from
 // X-Forwarded-For when `trust proxy` is enabled (config.ts's TRUST_PROXY,
 // default off). Left off, every request behind a reverse proxy arrives as
-// the proxy's single IP — meaning 10 wrong passwords from ONE attacker
-// shares that bucket with every other user behind the same proxy and locks
-// ALL of them out of login for 15 minutes. That's the realistic first-deploy
-// outcome, since virtually every PaaS terminates TLS at a proxy. Turning
-// TRUST_PROXY on fixes it, but only do that when an actual trusted proxy
-// sits in front (otherwise a client can spoof X-Forwarded-For and dodge the
-// limiter entirely — see index.ts). The Map is also in-memory only: state
+// the proxy's single IP — meaning LOGIN_RATE_LIMIT_MAX wrong passwords from
+// ONE attacker shares that bucket with every other user behind the same
+// proxy and locks ALL of them out of login for 15 minutes. That's the
+// realistic first-deploy outcome, since virtually every PaaS terminates TLS
+// at a proxy. Turning TRUST_PROXY on fixes it, but only do that when an
+// actual trusted proxy sits in front (otherwise a client can spoof
+// X-Forwarded-For and dodge the limiter entirely — see index.ts). The Map
+// is also in-memory only: state
 // resets on restart and isn't shared across multiple API instances. Redis
 // (already planned for Phase 2 seat locks) is the upgrade path for that.
 // index.ts warns at boot when this looks wrong. The seat-hold bucket below

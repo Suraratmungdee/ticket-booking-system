@@ -96,6 +96,16 @@ async function main() {
 
   // Teardown, scoped to ids this run created. The dev Postgres is shared
   // with other worktrees; never widen these filters.
+  //
+  // LIMITATION: these are plain statements at the end of main(), not a
+  // try/finally — this only runs on the success path. If anything above
+  // throws first (a failed registration, a dropped connection mid-burst),
+  // every delete below is skipped and this run's venue, event, showtime,
+  // seat map, seat, users and any bookings are stranded in the shared dev
+  // Postgres. Harmless to later runs (ids are timestamp-stamped, so nothing
+  // collides), but the leftover `load <stamp> event` keeps showing up in
+  // /events and /admin/events for every other worktree and accumulates
+  // until someone deletes it by hand. See docs/DEPLOYMENT.md.
   const users = await prisma.user.findMany({
     where: { email: { in: emails } },
     select: { id: true },

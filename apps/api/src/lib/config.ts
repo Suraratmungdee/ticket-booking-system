@@ -63,15 +63,23 @@ export const MAX_SEATS_PER_BOOKING = 8
 // The point of the cap is that one request cannot ask for a million rows.
 export const MAX_SEATS_PER_SEATMAP = 100
 
-// Seat-hold guard. MAX_SEATS_PER_BOOKING caps one booking, not how many
-// bookings a user may open — without this, one account can hold a whole
-// showtime a few seats at a time. Keyed on the authenticated user id rather
-// than the IP: /showtimes/:id/seats/hold requires a session anyway, and a
-// user id comes from a JWT we signed instead of a header a client can set,
-// so this bucket is unaffected by whether TRUST_PROXY is on.
+// Seat-hold guard. Throttles how fast one account can fire hold requests —
+// bounds the damage of someone hammering the endpoint (by hand or by an
+// accidental client-side retry loop) and leaves room for a person changing
+// their mind repeatedly while picking seats. Keyed on the authenticated user
+// id rather than the IP: /showtimes/:id/seats/hold requires a session
+// anyway, and a user id comes from a JWT we signed instead of a header a
+// client can set, so this bucket is unaffected by whether TRUST_PROXY is on.
 //
-// 10 per minute leaves room for someone changing their mind repeatedly while
-// picking seats, and still bounds how fast one account can accumulate holds.
+// LIMITATION: this is a rate limit, not a concurrency cap — it does not stop
+// one account from *accumulating* holds across many bookings over time.
+// MAX_SEATS_PER_BOOKING (8) x BOOKING_RATE_LIMIT_MAX (10/min) x
+// SEAT_HOLD_TTL_SECONDS (300s, in createBooking's expiresAt) works out to a
+// steady state of roughly 400 held seats per account — more than
+// MAX_SEATS_PER_SEATMAP (100) — because nothing caps how many PENDING_PAYMENT
+// bookings one user may have open at once. Closing that gap needs a cap on
+// concurrent PENDING_PAYMENT bookings per user, which this phase did not
+// build.
 export const BOOKING_RATE_LIMIT_MAX = 10
 export const BOOKING_RATE_LIMIT_WINDOW_MS = 60 * 1000
 

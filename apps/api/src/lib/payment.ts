@@ -134,8 +134,24 @@ export async function applyPaymentOutcome(input: {
       // arriving after a success already applied must not downgrade a
       // payment that has already succeeded — that would leave Payment.FAILED
       // sitting next to Booking.PAID with nothing to reconcile them.
+      //
+      // payment.status above was read BEFORE the booking row lock, so the
+      // `if` here is only a fast path (skip the write when we already know
+      // locally it would be pointless) — it is NOT what makes this safe.
+      // Safety comes from status: 'PENDING' in the updateMany's where below:
+      // that is the compare half of a compare-and-swap, so a concurrent
+      // 'succeeded' delivery for the same providerRef that already moved
+      // PENDING -> SUCCEEDED between our read and this write makes the
+      // write match zero rows instead of stomping FAILED over it. An
+      // unconditioned update() here (as this used to be) would not have
+      // that protection.
       if (payment.status === 'PENDING') {
-        await tx.payment.update({ where: { id: payment.id }, data: { status: 'FAILED' } })
+        // count === 0 means a concurrent success won the race and already
+        // moved this row past PENDING — nothing further to do here.
+        await tx.payment.updateMany({
+          where: { id: payment.id, status: 'PENDING' },
+          data: { status: 'FAILED' },
+        })
       }
       // A failed charge never moves the booking in either direction — the
       // user can retry until the hold expires, and expiry is the sweep's job.

@@ -253,7 +253,7 @@ describe('applyPaymentOutcome', () => {
           status: 'PENDING',
           booking: { id: 'b1', status: 'PENDING_PAYMENT' },
         }),
-        update: paymentUpdate,
+        updateMany: paymentUpdate,
       },
       $queryRaw: vi.fn().mockResolvedValue([{ status: 'PENDING_PAYMENT' }]),
       booking: { update: bookingUpdate },
@@ -262,7 +262,10 @@ describe('applyPaymentOutcome', () => {
     await applyPaymentOutcome({ eventId: 'evt_2', providerRef: 'ref_1', outcome: 'failed' })
 
     expect(paymentUpdate).toHaveBeenCalledWith(
-      expect.objectContaining({ data: expect.objectContaining({ status: 'FAILED' }) }),
+      expect.objectContaining({
+        where: expect.objectContaining({ id: 'p1', status: 'PENDING' }),
+        data: expect.objectContaining({ status: 'FAILED' }),
+      }),
     )
     expect(bookingUpdate).not.toHaveBeenCalled()
   })
@@ -282,7 +285,7 @@ describe('applyPaymentOutcome', () => {
           status: 'SUCCEEDED',
           booking: { id: 'b1', status: 'PAID' },
         }),
-        update: paymentUpdate,
+        updateMany: paymentUpdate,
       },
       $queryRaw: vi.fn().mockResolvedValue([{ status: 'PAID' }]),
       booking: { update: bookingUpdate },
@@ -293,6 +296,52 @@ describe('applyPaymentOutcome', () => {
     expect(paymentUpdate).not.toHaveBeenCalled()
     expect(bookingUpdate).not.toHaveBeenCalled()
     expect(result.bookingStatus).toBe('PAID')
+  })
+
+  // The race Finding 4 fixed: payment.status above (the findUnique result)
+  // is read BEFORE the booking row lock, so it can be stale by the time this
+  // branch writes. A concurrent 'succeeded' delivery for the same
+  // providerRef can move the real row PENDING -> SUCCEEDED in that window
+  // while this call's stale local read still says PENDING. Without the
+  // compare-and-swap (status: 'PENDING' in the updateMany where), the old
+  // unconditioned update() would stomp FAILED over the row a concurrent
+  // success just won — Payment.FAILED sitting next to Booking.PAID, which
+  // the comment on this branch says must never happen. This test simulates
+  // exactly that: the stale local read says PENDING, but the DB (mocked)
+  // reports the CAS matched zero rows because the real row has already
+  // moved on.
+  it('does not overwrite a payment a concurrent success already moved past PENDING', async () => {
+    const bookingUpdate = vi.fn()
+    const paymentUpdateMany = vi.fn().mockResolvedValue({ count: 0 })
+    txRuns({
+      webhookEvent: { create: vi.fn().mockResolvedValue({}) },
+      payment: {
+        findUnique: vi.fn().mockResolvedValue({
+          id: 'p1',
+          bookingId: 'b1',
+          status: 'PENDING', // stale: a concurrent success already won underneath this
+          booking: { id: 'b1', status: 'PENDING_PAYMENT' },
+        }),
+        updateMany: paymentUpdateMany,
+      },
+      $queryRaw: vi.fn().mockResolvedValue([{ status: 'PENDING_PAYMENT' }]),
+      booking: { update: bookingUpdate },
+    })
+
+    const result = await applyPaymentOutcome({
+      eventId: 'evt_failed_race',
+      providerRef: 'ref_1',
+      outcome: 'failed',
+    })
+
+    // The CAS was attempted (the stale read said PENDING)...
+    expect(paymentUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: expect.objectContaining({ id: 'p1', status: 'PENDING' }) }),
+    )
+    // ...but lost (count: 0), so nothing else may happen: no booking write,
+    // and the caller still sees the real, un-downgraded booking status.
+    expect(bookingUpdate).not.toHaveBeenCalled()
+    expect(result.bookingStatus).toBe('PENDING_PAYMENT')
   })
 
   it('marks a PENDING_PAYMENT booking PAID on success', async () => {
@@ -758,7 +807,7 @@ describe('applyPaymentOutcome — ticket issuance', () => {
           status: 'PENDING',
           booking: { id: 'b1', status: 'PENDING_PAYMENT' },
         }),
-        update: vi.fn(),
+        updateMany: vi.fn(),
       },
       $queryRaw: vi.fn().mockResolvedValue([{ status: 'PENDING_PAYMENT' }]),
       booking: { update: vi.fn() },

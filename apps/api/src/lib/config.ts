@@ -18,10 +18,11 @@ export const COOKIE_SECURE = process.env.NODE_ENV === 'production'
 // production this fallback must never be reachable — the check below throws
 // at startup instead, so a misconfigured deploy fails loudly rather than
 // silently signing forgeable tokens.
+const DEV_JWT_SECRET_FALLBACK = 'dev-secret-change-me'
 if (process.env.NODE_ENV === 'production' && !process.env.JWT_SECRET) {
   throw new Error('JWT_SECRET must be set when NODE_ENV=production')
 }
-export const JWT_SECRET = process.env.JWT_SECRET ?? 'dev-secret-change-me'
+export const JWT_SECRET = process.env.JWT_SECRET ?? DEV_JWT_SECRET_FALLBACK
 
 export const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN ?? 'http://localhost:3000'
 
@@ -112,6 +113,20 @@ export function assertPaymentProviderIsSafe(): void {
   }
   if (process.env.NODE_ENV === 'production' && !process.env.PAYMENT_WEBHOOK_SECRET) {
     throw new Error('PAYMENT_WEBHOOK_SECRET must be set when NODE_ENV=production')
+  }
+  // .env.example commits the exact same string as the code's dev fallback.
+  // The "must be set" check right above JWT_SECRET's export only verifies
+  // the variable is *set* — a deploy that copied .env.example verbatim
+  // would pass it while booting with a publicly known JWT signing key,
+  // letting anyone forge a valid session cookie for any user. Reject that
+  // specific value outright in production.
+  if (
+    process.env.NODE_ENV === 'production' &&
+    process.env.JWT_SECRET === DEV_JWT_SECRET_FALLBACK
+  ) {
+    throw new Error(
+      'JWT_SECRET is still the committed .env.example placeholder — set a real secret before deploying to production.',
+    )
   }
   // .env.example commits the same string as the code fallback above. The
   // check just above only verifies the variable is *set* — a deploy that

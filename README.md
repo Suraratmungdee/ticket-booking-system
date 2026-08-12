@@ -38,6 +38,8 @@ tests/unit   unit test ครอบ apps/api
 npm install
 
 # 2. เตรียมไฟล์ env (ค่า default ตรงกับ docker-compose อยู่แล้ว)
+#    ไม่ต้องไปหา API key จริงจากที่ไหนเลย — ทุก field ที่เกี่ยวกับบริการภายนอก
+#    มีค่า default ที่ทำให้ระบบทำงานได้ครบ (ดูรายละเอียดด้านล่าง)
 cp apps/api/.env.example apps/api/.env
 cp apps/web/.env.example apps/web/.env.local
 
@@ -63,6 +65,14 @@ npm run dev:web    # http://localhost:3000
 เปิด http://localhost:3000 แล้วลองสมัครสมาชิก → เข้าสู่ระบบ → ดูรายการ event
 
 > ⚠️ `apps/web` ต้องรันที่พอร์ต 3000 เพราะ CORS ของ backend จำกัด origin ไว้ตาม `FRONTEND_ORIGIN`
+
+### ไม่ต้องมี API key จริงเพื่อทดสอบระบบ
+
+ทั้ง flow จองตั๋ว — ค้นหา, เลือกที่นั่ง, **จ่ายเงิน**, ได้ตั๋ว QR, และหน้า admin — ทดสอบได้ครบโดยไม่ต้องสมัครบริการภายนอกเลยสักตัว:
+
+- **จ่ายเงิน**: `.env.example` ตั้ง `PAYMENT_PROVIDER="mock"` เป็นค่า default อยู่แล้ว ระบบจึงจำลองการจ่ายเงินเองผ่านหน้า `/mock-pay/...` (มี banner "หน้าจำลองการชำระเงิน" กำกับชัดเจน) ไม่มีการเรียก Stripe จริงเลยในโค้ด — ดู `docs/DEPLOYMENT.md` หัวข้อ `PAYMENT_PROVIDER`
+- **อีเมลยืนยัน**: `RESEND_API_KEY` เว้นว่างได้ ระบบจะ log เนื้อหาอีเมลที่ "จะส่ง" ออกทาง console แทนการส่งจริง (ดูใน terminal ที่รัน `npm run dev:api`) ไม่กระทบ flow การจองหรือได้ตั๋วแต่อย่างใด
+- **บัญชี admin**: ตั้งเองได้ตามขั้นตอน 2.1 ด้านบน ไม่ต้องขอจากใคร
 
 ## คำสั่งที่ใช้บ่อย
 

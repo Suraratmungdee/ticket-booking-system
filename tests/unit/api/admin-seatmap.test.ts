@@ -15,7 +15,15 @@ import {
   createSeatMap,
   SeatMapTooLargeError,
 } from '../../../apps/api/src/lib/admin'
+import { createSeatMapHandler } from '../../../apps/api/src/routes/admin'
 import { MAX_SEATS_PER_SEATMAP } from '../../../apps/api/src/lib/config'
+
+function fakeRes() {
+  const res: any = {}
+  res.status = vi.fn().mockReturnValue(res)
+  res.json = vi.fn().mockReturnValue(res)
+  return res
+}
 
 function txRuns() {
   m.transaction.mockImplementation(async (fn: (t: unknown) => unknown) =>
@@ -181,5 +189,31 @@ describe('createSeatMap', () => {
     })
 
     expect(m.seatMapCreate.mock.calls[0][0].data.seats.create).toHaveLength(0)
+  })
+})
+
+describe('createSeatMapHandler', () => {
+  // rows: ['A', 'A'] would make createSeatMap generate two
+  // { row: 'A', number: 1 } seats, tripping the @@unique([seatMapId, row,
+  // number]) constraint as a raw P2002. The schema's rows.refine must catch
+  // this as a 400 before createSeatMap ever runs — same shape as the cap
+  // test above, asserting the transaction was never opened.
+  it('rejects a duplicate row label before the transaction opens', async () => {
+    const req: any = {
+      user: { id: 'admin-1' },
+      body: {
+        showtimeId: 'st1',
+        zoneName: 'ซ้ำ',
+        price: 100,
+        rows: ['A', 'A'],
+        seatsPerRow: 2,
+      },
+    }
+    const res = fakeRes()
+
+    await createSeatMapHandler(req, res, vi.fn())
+
+    expect(res.status).toHaveBeenCalledWith(400)
+    expect(m.transaction).not.toHaveBeenCalled()
   })
 })

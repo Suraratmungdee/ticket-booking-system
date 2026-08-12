@@ -199,7 +199,16 @@ const seatMapCreateSchema = z.object({
   // Whole baht. int() rejects 149.5, which would silently become a Float
   // price and break every total in the system.
   price: z.number().int().nonnegative(),
-  rows: z.array(z.string().min(1).max(4)).min(1),
+  // Duplicate labels (e.g. ['A', 'A']) would make createSeatMap generate two
+  // { row: 'A', number: 1 } seats, tripping the @@unique([seatMapId, row,
+  // number]) constraint as a raw P2002 instead of a clear 400. Rejected here
+  // so the request never reaches the database.
+  rows: z
+    .array(z.string().min(1).max(4))
+    .min(1)
+    .refine((rows) => new Set(rows).size === rows.length, {
+      message: 'rows must not contain duplicate labels',
+    }),
   seatsPerRow: z.number().int().positive(),
 })
 
@@ -219,8 +228,11 @@ export const createSeatMapHandler: RequestHandler = async (req, res) => {
         .json({ error: `A seat map may contain at most ${MAX_SEATS_PER_SEATMAP} seats` })
     }
     if (isPrismaCode(err, 'P2003')) return res.status(400).json({ error: 'Unknown showtimeId' })
-    // A duplicate (seatMapId, row, number) cannot happen here — the seats are
-    // generated, not supplied — so P2002 stays a 500 rather than being
+    // seatMapCreateSchema's rows.refine rejects duplicate row labels up
+    // front, so a duplicate (seatMapId, row, number) is not expected to
+    // reach the database. P2002 is deliberately left unhandled here rather
+    // than caught: if it ever surfaces, that means the schema's guard was
+    // bypassed or missed a case, and it should show up as a loud 500, not be
     // swallowed. Never catch a constraint error and continue inside a
     // transaction: Postgres has already aborted it.
     logServerError('POST /admin/seatmaps failed', err)

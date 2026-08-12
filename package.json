@@ -1,12 +1,18 @@
 {
   "name": "ticket-booking-system",
   "private": true,
-  "workspaces": ["apps/*"],
+  "workspaces": [
+    "apps/*"
+  ],
   "scripts": {
     "build": "npm run build --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
     "dev:api": "npm run dev --workspace apps/api",
     "dev:web": "npm run dev --workspace apps/web",
-    "load:booking": "tsx --env-file-if-exists=apps/api/.env tests/load/booking-burst.ts"
+    "load:booking": "tsx --env-file-if-exists=apps/api/.env tests/load/booking-burst.ts",
+    "test:e2e": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.62.1"
   }
 }

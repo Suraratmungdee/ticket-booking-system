@@ -85,6 +85,7 @@ npm run dev:web   # รันเฉพาะ frontend
 - `.env` และ `.env.local` อยู่ใน `.gitignore` — **ห้าม commit** มีเฉพาะ `.env.example` ที่เป็นค่า placeholder
 - ตอน deploy production ต้องตั้ง `JWT_SECRET` จริง มิฉะนั้น backend จะไม่ยอมสตาร์ท
 - cookie ใช้ `SameSite=Lax` ตอน dev และสลับเป็น `None` + `Secure` อัตโนมัติเมื่อ `NODE_ENV=production` (รองรับกรณี deploy คนละ domain)
+- ก่อน deploy จริงครั้งแรก อ่าน [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) — environment variables ที่ต้องตั้ง, deploy order, rollback, และสิ่งที่ยังไม่เคยถูก verify
 
 ## สถานะงาน
 

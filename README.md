@@ -116,11 +116,4 @@ npm run test:e2e  # Playwright: flow ค้นหา→เลือกที่�
 | 5 | Admin panel: CRUD event/รอบ/ผังที่นั่ง, รายการจอง + filter, audit log, dashboard ยอดขาย |
 | 6 | Security headers, rate limit (login + จอง), สคริปต์ load test, [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) |
 
-### สิ่งที่ตัดออกโดยตั้งใจ ไม่ใช่ของค้าง
-
-- **ชำระเงินผ่าน mock provider ที่เขียนเอง ไม่ใช่ Stripe** — โครงสร้างเป็นของจริงครบ (checkout session, webhook, ตรวจลายเซ็น, idempotency, transaction เดียว) และแยกชั้น provider ไว้ให้เปลี่ยนไป Stripe ได้โดยไม่แตะ logic การจอง เหตุผลอยู่ใน `docs/superpowers/specs/2026-08-11-phase3-payment-design.md`
-- **ไม่มีการคืนเงิน** — `/admin/bookings` แสดงสถานะ `REFUND_REQUIRED` ให้คนไปกดคืนใน dashboard ของ provider เอง
-- **ไม่มีปุ่มยกเลิกรอบ** — `createBooking` อ่าน `Showtime.status` โดยล็อกเฉพาะแถวที่นั่ง การเปิดให้แก้ status ตอน runtime จะสร้าง race ทันที เหตุผลเต็มอยู่ใน `docs/superpowers/specs/2026-08-12-phase5-admin-panel-design.md`
-- **ไม่มี DELETE endpoint** — FK ทั้งสายเป็น RESTRICT และ `CLAUDE.md` §5 ห้ามลบข้อมูลจริง
-
 เอกสาร spec / plan / ผล review ของทุก phase อยู่ใน [`docs/superpowers/`](docs/superpowers/)

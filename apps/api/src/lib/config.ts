@@ -4,14 +4,18 @@ export const BCRYPT_SALT_ROUNDS = 10
 export const JWT_MAX_AGE_MS = 2 * 60 * 60 * 1000
 export const JWT_COOKIE_NAME = 'token'
 
-// In production, apps/web and apps/api deploy to different registrable
-// domains, so the cookie is cross-site from the browser's point of view —
-// `sameSite: 'lax'` would silently never be sent back, making login look
-// like it worked while every later request is anonymous. `none` fixes that,
-// but browsers reject `SameSite=None` cookies outright unless `Secure` is
-// also set, so the two must always move together.
-export const COOKIE_SAME_SITE = process.env.NODE_ENV === 'production' ? 'none' : 'lax'
-export const COOKIE_SECURE = process.env.NODE_ENV === 'production'
+// Whether apps/web and apps/api are on different registrable domains — not
+// the same question as NODE_ENV=production. A staging/demo deploy (e.g.
+// PAYMENT_PROVIDER=mock, which refuses NODE_ENV=production outright) can
+// still split frontend and backend across two hosts, and needs this too.
+// When cross-site, the cookie is cross-site from the browser's point of
+// view — `sameSite: 'lax'` would silently never be sent back, making login
+// look like it worked while every later request is anonymous. `none` fixes
+// that, but browsers reject `SameSite=None` cookies outright unless
+// `Secure` is also set, so the two must always move together.
+const CROSS_SITE_COOKIES = process.env.COOKIE_CROSS_SITE === 'true' || process.env.NODE_ENV === 'production'
+export const COOKIE_SAME_SITE = CROSS_SITE_COOKIES ? 'none' : 'lax'
+export const COOKIE_SECURE = CROSS_SITE_COOKIES
 
 // The attributes that must be identical going in and coming out: a browser
 // only drops a cookie on clearCookie when name, path, secure and sameSite
